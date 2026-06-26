@@ -171,7 +171,11 @@ static WRITER: Mutex<Writer> = Mutex::new(Writer::new());
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    WRITER.lock().write_fmt(args).unwrap();
+    // Пока держим замок WRITER, выключаем прерывания: иначе обработчик прерывания
+    // мог бы попытаться взять тот же замок и устроить дедлок.
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        WRITER.lock().write_fmt(args).unwrap();
+    });
 }
 
 /// Печать без перевода строки: `print!("x = {}", x)`.
