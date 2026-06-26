@@ -52,10 +52,26 @@ pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static>
     OffsetPageTable::new(level_4_table, physical_memory_offset)
 }
 
-/// Возвращает `&mut` на активную таблицу 4-го уровня.
+/// Возвращает `&mut` на таблицу страниц во фрейме `frame`, доступную по оффсету
+/// отображения физпамяти (`virt = phys + physical_memory_offset`). Единая точка доступа
+/// к таблицам через оффсет — её переиспользуют [`active_level_4_table`] и адресные
+/// пространства процессов ([`crate::mm::addr_space`]).
 ///
-/// Берём физический адрес L4-таблицы из CR3, прибавляем `physical_memory_offset` —
-/// получаем виртуальный адрес, по которому таблица доступна для чтения/записи.
+/// # Safety
+///
+/// `frame` должен указывать на настоящую таблицу страниц, `physical_memory_offset` —
+/// корректный оффсет всей физпамяти. Нельзя держать две `&mut`-ссылки на ОДИН фрейм
+/// одновременно (это были бы два `&mut` на одну таблицу).
+pub(crate) unsafe fn page_table_at(
+    frame: PhysFrame,
+    physical_memory_offset: VirtAddr,
+) -> &'static mut PageTable {
+    let virt = physical_memory_offset + frame.start_address().as_u64();
+    let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
+    &mut *page_table_ptr
+}
+
+/// Возвращает `&mut` на активную таблицу 4-го уровня (её фрейм — в CR3).
 ///
 /// # Safety
 ///
@@ -64,12 +80,7 @@ pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static>
 unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut PageTable {
     // CR3 хранит физический фрейм активной L4-таблицы (флаги нам тут не нужны).
     let (level_4_table_frame, _) = Cr3::read();
-
-    let phys = level_4_table_frame.start_address();
-    let virt = physical_memory_offset + phys.as_u64();
-    let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
-
-    &mut *page_table_ptr
+    page_table_at(level_4_table_frame, physical_memory_offset)
 }
 
 /// Демонстрация M3b: создаёт новый маппинг — отображает виртуальную страницу `page`

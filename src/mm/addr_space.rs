@@ -24,9 +24,17 @@
 //! не изменится.
 //!
 //! Тейкдаун (освобождение PML4 и страниц процесса) пока не делаем — см. `docs/HARDENING.md`.
+//!
+//! # Слой (D7)
+//!
+//! `CR3` и таблицы страниц — арх-специфика x86_64; формально этому модулю место за
+//! `arch`-швом. Пока он живёт в `mm` — как и существующий [`crate::mm::paging`], который
+//! уже напрямую трогает `Cr3`/`OffsetPageTable`. Полная арх-абстракция слоя таблиц —
+//! отдельный заход (см. `docs/HARDENING.md`).
 
+use crate::mm::paging::page_table_at;
 use x86_64::registers::control::Cr3;
-use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB};
+use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PhysFrame, Size4KiB};
 use x86_64::VirtAddr;
 
 /// Адресное пространство процесса: владеет своим корнем таблиц страниц (PML4).
@@ -55,20 +63,15 @@ impl AddressSpace {
             .expect("out of frames for a process PML4");
 
         // SAFETY: фрейм только что выделен (уникальный) и доступен по phys_offset.
-        let new_pml4 = unsafe {
-            let ptr: *mut PageTable = (phys_offset + frame.start_address().as_u64()).as_mut_ptr();
-            &mut *ptr
-        };
+        let new_pml4 = unsafe { page_table_at(frame, phys_offset) };
         new_pml4.zero();
 
-        // Копируем все 512 L4-записей активной таблицы → ядро становится общим.
+        // Копируем все 512 L4-записей активной таблицы → ядро становится общим. `new` и
+        // `active` — разные фреймы, поэтому два `&mut` на РАЗНЫЕ таблицы не алиасят.
         let (active_frame, _) = Cr3::read();
-        // SAFETY: активный PML4 доступен по phys_offset; читаем его записи.
-        let active_pml4 = unsafe {
-            let ptr: *const PageTable =
-                (phys_offset + active_frame.start_address().as_u64()).as_ptr();
-            &*ptr
-        };
+        // SAFETY: активный PML4 — настоящая таблица, доступен по phys_offset; это другой
+        // фрейм, не тот, что у new_pml4.
+        let active_pml4 = unsafe { page_table_at(active_frame, phys_offset) };
         for i in 0..512 {
             new_pml4[i] = active_pml4[i].clone();
         }
@@ -85,13 +88,9 @@ impl AddressSpace {
     /// `phys_offset` — корректный оффсет физпамяти. Нельзя держать два таких маппера на
     /// одно пространство одновременно (это были бы два `&mut` на одну таблицу).
     pub unsafe fn mapper(&self, phys_offset: VirtAddr) -> OffsetPageTable<'static> {
-        // SAFETY: PML4 этого пространства доступен по phys_offset; вызывающий гарантирует
-        // отсутствие второго живого маппера на него.
-        unsafe {
-            let ptr: *mut PageTable =
-                (phys_offset + self.pml4_frame.start_address().as_u64()).as_mut_ptr();
-            OffsetPageTable::new(&mut *ptr, phys_offset)
-        }
+        // SAFETY: PML4 этого пространства — настоящая таблица, доступен по phys_offset;
+        // вызывающий гарантирует отсутствие второго живого маппера на него.
+        unsafe { OffsetPageTable::new(page_table_at(self.pml4_frame, phys_offset), phys_offset) }
     }
 
     /// Физический фрейм PML4 (для записи в `CR3` при активации пространства).
