@@ -19,6 +19,11 @@
 #![test_runner(crate::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+// Подключаем крейт `alloc` (Box/Vec/String/…). Он работает поверх нашего
+// `#[global_allocator]` из `mm::heap`, который надо проинициализировать
+// (`mm::heap::init_heap`) до первой аллокации.
+extern crate alloc;
+
 pub mod arch;
 pub mod drivers;
 pub mod fs;
