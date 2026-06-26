@@ -12,3 +12,7 @@ publish = false
 # Классический BIOS-bootloader из экосистемы blog_os. Совместим с `bootimage` 0.10.x.
 # Миграцию на bootloader 0.11 (BIOS+UEFI) планируем на этапе M11.
 bootloader = "0.9.23"
+
+# Спин-блокировка для глобального VGA-Writer: на голом железе нет ОС, которая
+# усыпит поток, поэтому замок «крутится» в цикле. `Mutex::new` — const.
+spin = "0.12"
