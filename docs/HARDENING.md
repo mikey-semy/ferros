@@ -85,6 +85,12 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   reads `CR2` today (safe). When M5c extends it to inspect user memory, a fault *inside*
   the handler could recurse on the same stack — give `#PF` its own IST entry (like
   `#DF`) or keep the handler strictly memory-access-free.
+- **`uaccess` is not fault-tolerant (M5b).** `with_user_bytes` range-checks that the buffer
+  is in the user half (blocks "pass a kernel pointer"), but a *valid-looking but unmapped*
+  user pointer still faults → kernel panic today. Real `copy_from/to_user` needs a fault
+  fixup table (extable): the `#PF` handler recognises a fault inside a uaccess region and
+  returns `-EFAULT` instead of dying. Also `write` content capture (`LAST_WRITE_*`) is
+  test observability in the production path — drop it once there's a better test hook.
 
 ## Cross-cutting (whole kernel)
 
