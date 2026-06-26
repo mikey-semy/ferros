@@ -1,8 +1,8 @@
 # ferros — Roadmap
 
 Each milestone is a complete, observable result ("it now does X") and ends with a
-merged PR. We detail a milestone only when we reach it. Current status: **M3 in
-progress** (M3a paging + M3b frame allocator/mapping done; M3c heap next; M0–M2 merged).
+merged PR. We detail a milestone only when we reach it. Current status: **M4 next**
+(M0–M3 done: M3 added paging, a frame allocator, and a kernel heap → `Box`/`Vec`/`String`).
 
 > This is **depth** (the path forward). For **breadth** — alternatives at each layer
 > (firmware, bootloader, runner, architecture, display) and where we could branch out

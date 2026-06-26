@@ -33,6 +33,11 @@ pic8259 = "0.11"
 # Декодирование скан-кодов PS/2-клавиатуры в символы. (M2c)
 pc-keyboard = "0.9"
 
+# Простой аллокатор кучи на связном списке свободных блоков. Подключаем как
+# `#[global_allocator]` (M3c) — он включает крейт `alloc` (Box/Vec/String). O(n) на
+# аллокацию: для bring-up достаточно, быстрый fixed-size-block — в HARDENING.md.
+linked_list_allocator = "0.10"
+
 [package.metadata.bootimage]
 # Тестовый режим QEMU: устройство isa-debug-exit (ядро само завершит QEMU кодом
 # успех/провал), вывод тестов в serial → stdio, без окна.

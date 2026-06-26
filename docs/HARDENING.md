@@ -26,9 +26,21 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
 
 ## M3 — memory
 
-_(to be filled as M3 lands — expected deferrals: NX / W^X enforcement, guard pages,
-KASLR, SMEP/SMAP, huge pages, demand paging / copy-on-write, a slab/buddy allocator
-instead of the linked-list heap.)_
+- **Slow allocators (performance).** The frame allocator (M3b) is O(n) per
+  `allocate_frame` and never frees frames; the heap (M3c, `linked_list_allocator`) is
+  O(n) first-fit and fragments. Replace with a bitmap/buddy frame allocator and a
+  fixed-size-block (slab) heap on the hot path. Deferred deliberately: correctness-first
+  bring-up — these are pure speed wins, not correctness.
+- **No W^X / NX.** Heap and mapped pages are `PRESENT | WRITABLE` with no `NO_EXECUTE`;
+  nothing enforces write-xor-execute. Revisit with userspace (M5).
+- **No guard pages.** Around the kernel heap region; a heap overrun silently corrupts
+  neighbours. Add unmapped guard pages.
+- **`create_example_mapping` is demo-only.** It maps an arbitrary page to the VGA frame
+  via an unchecked `map_to` — a teaching one-shot, not a real mapping API.
+- **Fixed 100 KiB heap, no growth-on-demand.** Enlarge or grow dynamically later.
+- **KASLR, SMEP/SMAP, huge pages, demand paging / copy-on-write** — none yet.
+- **Single global spinlock on the heap** — a contention point once we have SMP (no SMP
+  yet, so moot for now).
 
 ## Cross-cutting (whole kernel)
 
