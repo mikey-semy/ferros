@@ -19,15 +19,18 @@
 #![test_runner(crate::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+pub mod gdt;
 pub mod interrupts;
 pub mod serial;
 pub mod vga_buffer;
 
 use core::panic::PanicInfo;
 
-/// Инициализация ядра: загружаем IDT (обработчики исключений/прерываний).
+/// Инициализация ядра: GDT+TSS, затем IDT (обработчики исключений/прерываний).
+/// Порядок важен: IDT ссылается на IST-стек из TSS, поэтому GDT — первым.
 /// Вызывается из `_start` до основной работы.
 pub fn init() {
+    gdt::init();
     interrupts::init_idt();
 }
 
