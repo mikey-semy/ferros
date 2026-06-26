@@ -20,6 +20,7 @@ fn main() {
     for f in [
         "src/main.rs",
         "Cargo.toml",
+        "Cargo.lock",
         "linker.ld",
         "x86_64-user.json",
         ".cargo/config.toml",
@@ -40,6 +41,10 @@ fn main() {
         "RUSTC",
         "RUSTC_WRAPPER",
         "RUSTC_WORKSPACE_WRAPPER",
+        // Jobserver внешнего cargo: если унаследовать, вложенная сборка делила бы пул
+        // токенов с заблокированным родителем — риск взаимной блокировки. Пусть берёт свой.
+        "CARGO_MAKEFLAGS",
+        "MAKEFLAGS",
     ] {
         cmd.env_remove(var);
     }

@@ -38,10 +38,16 @@ pub enum ElfError {
     NotExecutable,
     /// Не для x86-64 (e_machine ≠ 0x3E).
     NotX86_64,
+    /// Размер программного заголовка меньше ELF64-минимума (56 байт).
+    BadProgramHeaderSize,
     /// Сегмент выходит за пределы файла.
     SegmentOutOfFile,
+    /// `p_filesz > p_memsz` — некорректный сегмент (иначе обнуление `.bss` ушло бы в минус).
+    FileSizeExceedsMemSize,
     /// Сегмент целится вне пользовательской половины адресного пространства.
     SegmentNotInUserSpace,
+    /// Страница сегмента уже отображена чем-то посторонним (не нашей загрузкой) — не затираем.
+    SegmentOverlapsExisting,
 }
 
 const ET_EXEC: u16 = 2;
@@ -98,7 +104,7 @@ pub fn load(
     let phentsize = read_u16(bytes, 0x36)? as usize;
     let phnum = read_u16(bytes, 0x38)? as usize;
     if phentsize < PH_ENTRY_SIZE {
-        return Err(ElfError::BadMagic);
+        return Err(ElfError::BadProgramHeaderSize);
     }
     // Вся таблица программных заголовков обязана лежать в файле — тогда чтения внутри
     // цикла заведомо в границах.
@@ -127,6 +133,11 @@ pub fn load(
         if file_end > bytes.len() {
             return Err(ElfError::SegmentOutOfFile);
         }
+        // По спеку filesz ≤ memsz; иначе обнуление .bss (memsz-filesz) ушло бы в
+        // переполнение usize, а copy(filesz) — за пределы отображённых под memsz страниц.
+        if p_filesz > p_memsz as usize {
+            return Err(ElfError::FileSizeExceedsMemSize);
+        }
         // Сегмент обязан целиться в пользовательскую половину.
         let mem_end = p_vaddr
             .checked_add(p_memsz)
@@ -139,14 +150,16 @@ pub fn load(
         }
 
         // Маппим все страницы, покрывающие [p_vaddr, p_vaddr+p_memsz). Если страница уже
-        // отображена (соседний сегмент поделил граничную страницу) — пропускаем, чтобы не
-        // словить двойной маппинг.
+        // отображена — это коллизия с чем-то посторонним (ядром или перекрывающимся
+        // сегментом): ОШИБКА, а не «тихо затереть». Наши сегменты постранично выровнены и
+        // не перекрываются (см. user/hello/linker.ld), так что легальных пересечений нет.
         let first = Page::<Size4KiB>::containing_address(VirtAddr::new(p_vaddr));
         let last = Page::<Size4KiB>::containing_address(VirtAddr::new(mem_end - 1));
         for page in Page::range_inclusive(first, last) {
-            if mapper.translate_page(page).is_err() {
-                crate::mm::paging::map_user_page(page, mapper, frame_allocator);
+            if mapper.translate_page(page).is_ok() {
+                return Err(ElfError::SegmentOverlapsExisting);
             }
+            crate::mm::paging::map_user_page(page, mapper, frame_allocator);
         }
 
         // SAFETY: страницы [p_vaddr, mem_end) только что отображены present+writable+user в
