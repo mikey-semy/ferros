@@ -91,11 +91,18 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   fixup table (extable): the `#PF` handler recognises a fault inside a uaccess region and
   returns `-EFAULT` instead of dying. Also `write` content capture (`LAST_WRITE_*`) is
   test observability in the production path — drop it once there's a better test hook.
-- **No per-process address space yet (M5c1).** A loaded ELF runs in the *shared* kernel
-  address space (its pages live in the kernel's tables, user-gated by the leaf PTE). There's
-  no inter-process isolation and no user/user separation. Deferred per **D10** toward the
-  higher-half / bootloader-0.11 move (M11); the ELF loader already takes a mapper, so
-  retargeting it to a per-process `AddressSpace` is a small change (M5c2).
+- **No address-space teardown (M5c2).** `AddressSpace::new_sharing_kernel` allocates a PML4
+  frame, and the process's user page-table subtree + page frames are never freed (the frame
+  allocator never frees anyway — M3 item). Fine for the one-shot program; real process exit
+  must reclaim them.
+- **User space confined to one L4 slot via a hand-picked high address (M5c2).** Because
+  bootloader 0.9 loads the kernel in the lower half, the user ELF/stack are hard-pinned to
+  L4 slot 255 (`0x7F80…`, built with `code-model=large`) to guarantee a kernel-free slot.
+  After the higher-half move (M11) the user should get the whole lower half (and the small
+  code model / a normal base); the `AddressSpace` mechanism itself carries over unchanged.
+- **AddressSpace is x86_64-specific but lives in `mm`.** Like the existing `mm::paging`
+  (which already uses `Cr3`/`OffsetPageTable` directly), `mm::addr_space` is not yet behind
+  the arch seam (D7). Abstract the whole `mm` page-table layer per-arch in a later pass.
 - **No W^X / NX on loaded ELF segments (M5c1).** `mm::map_user_page` maps every user page
   `PRESENT|WRITABLE|USER_ACCESSIBLE`, so even an ELF's `.text` is writable and its `.data`
   is executable. The loader ignores `p_flags`. Honor per-segment R/W/X (and set `NO_EXECUTE`)

@@ -118,12 +118,12 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // ELF (крейт `user/hello`, встроен в образ через build.rs). Ядро разбирает ELF, кладёт
     // сегменты в память кольца 3 и прыгает в точку входа; программа печатает строку
     // настоящим `write` и завершается `exit`. Видно прямо на экране.
-    // SAFETY: вызывается один раз, mapper/frame_allocator — для активной таблицы, куча
-    // поднята; адреса сегментов/стека свободны.
+    // SAFETY: вызывается один раз; phys_mem_offset корректен, куча поднята; адреса
+    // сегментов/стека попадают в слот, свободный у ядра.
     unsafe {
         ferros::arch::x86_64::syscall::run_user_elf(
             ferros::syscall::elf::HELLO_ELF,
-            &mut mapper,
+            phys_mem_offset,
             &mut frame_allocator,
         )
     };

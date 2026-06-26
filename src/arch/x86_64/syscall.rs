@@ -31,11 +31,13 @@
 //! безопасным Rust и зовётся отсюда.
 
 use crate::arch::x86_64::gdt;
+use crate::mm::addr_space::AddressSpace;
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::instructions::interrupts;
+use x86_64::registers::control::Cr3;
 use x86_64::registers::model_specific::{Efer, EferFlags, LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
-use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, Page, Size4KiB};
+use x86_64::structures::paging::{FrameAllocator, Page, Size4KiB};
 use x86_64::VirtAddr;
 
 /// Снимок регистров пользователя на входе в `syscall`, который строит входной трамплин
@@ -230,44 +232,60 @@ pub fn init() {
     SYSCALL_KERNEL_RSP.store(top & !0xF, Ordering::SeqCst);
 }
 
-/// Виртуальный адрес страницы стека пользователя (нижняя половина — пользовательская часть
-/// адресного пространства; в M5c2 у процессов будут свои таблицы). Код/данные программы
-/// кладутся по адресам из её ELF (у `user/hello` — от `0x40_0000`), далеко от стека.
-pub const USER_STACK_VA: u64 = 0x4010_0000;
+/// Виртуальный адрес страницы стека пользователя. Лежит в L4-слоте 255 (`0x7F80…`) —
+/// том же приватном слоте, что и сегменты ELF программы (см. `user/hello/linker.ld`), —
+/// чтобы вся пользовательская память была в одном свободном у ядра слоте.
+pub const USER_STACK_VA: u64 = 0x7F80_1000_0000;
 
-/// Загружает и запускает пользовательскую программу из её ELF-образа (M5c1): разбирает и
-/// маппит сегменты ([`crate::syscall::elf::load`]), отводит страницу под стек, прыгает в
-/// кольцо 3 на точку входа. Программа делает свои системные вызовы и завершается `exit` —
-/// тогда управление возвращается сюда. Возвращает вершину пользовательского стека (тест
-/// сверяет с ней зафиксированный `user_rsp`).
+/// Загружает и запускает пользовательскую программу из её ELF-образа в **собственном
+/// адресном пространстве** (M5c2): заводит процессу свой PML4 (память ядра общая), грузит
+/// туда сегменты, отводит страницу под стек, переключает `CR3` и прыгает в кольцо 3 на
+/// точку входа. На `exit` управление возвращается сюда, и мы восстанавливаем `CR3` ядра.
+/// Возвращает вершину пользовательского стека (тест сверяет с ней зафиксированный `user_rsp`).
 ///
-/// Загрузка идёт в активную (ядровую) таблицу: отдельного адресного пространства ещё нет
-/// (M5c2), а нижняя половина у ядра свободна. Состояние прерываний (IF) сохраняется и
-/// восстанавливается: в кольцо 3 входим с IF=0 и обратно приходим с IF=0.
+/// Пока процесс активен (его `CR3`), ядро остаётся отображённым (мы скопировали L4-записи
+/// ядра), поэтому `syscall`/прерывания/этот код работают. Делаем всё с **выключенными
+/// прерываниями**: чужое адресное пространство активно, и вытеснение в этот момент увело бы
+/// другой поток в него же.
 ///
 /// # Safety
-/// Вызывать с корректными `mapper`/`frame_allocator` для активной таблицы и поднятой
-/// кучей. Адреса сегментов ELF и `USER_STACK_VA` должны быть не отображены (иначе `map_to`
-/// запаникует).
+/// `phys_offset` — корректный оффсет физпамяти; `frame_allocator` валиден; куча поднята.
+/// VA сегментов ELF / `USER_STACK_VA` должны попадать в слот, свободный у ядра (иначе
+/// загрузчик вернёт ошибку коллизии / `map_to` запаникует).
 ///
 /// # Panics
 /// Если ELF не загрузился ([`crate::syscall::elf::load`] вернул ошибку).
 pub unsafe fn run_user_elf(
     elf_bytes: &[u8],
-    mapper: &mut OffsetPageTable,
+    phys_offset: VirtAddr,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) -> u64 {
-    let entry = crate::syscall::elf::load(elf_bytes, mapper, frame_allocator)
-        .expect("failed to load user ELF");
+    let was_enabled = interrupts::are_enabled();
+    // Пока активно чужое адресное пространство — без прерываний (см. доку выше).
+    interrupts::disable();
 
+    let (kernel_pml4, cr3_flags) = Cr3::read();
+    // SAFETY: phys_offset корректен; создаём процессу свой PML4 с общей памятью ядра.
+    let aspace = unsafe { AddressSpace::new_sharing_kernel(phys_offset, frame_allocator) };
+
+    // Активируем адресное пространство процесса. Ядро в нём отображено (скопированные
+    // L4-записи), поэтому исполнение кода ядра продолжается без сбоев.
+    // SAFETY: PML4 процесса валиден и содержит все отображения ядра.
+    unsafe { Cr3::write(aspace.pml4_frame(), cr3_flags) };
+
+    // Грузим сегменты и стек уже в активную таблицу процесса — теперь запись содержимого
+    // по пользовательским адресам видна CPU.
+    // SAFETY: единственный живой маппер на это пространство в пределах функции.
+    let mut pmapper = unsafe { aspace.mapper(phys_offset) };
+    let entry = crate::syscall::elf::load(elf_bytes, &mut pmapper, frame_allocator)
+        .expect("failed to load user ELF");
     let stack_page = Page::containing_address(VirtAddr::new(USER_STACK_VA));
-    crate::mm::paging::map_user_page(stack_page, mapper, frame_allocator);
+    crate::mm::paging::map_user_page(stack_page, &mut pmapper, frame_allocator);
     let user_stack_top = USER_STACK_VA + 4096;
 
     let sel = gdt::selectors();
-    let was_enabled = interrupts::are_enabled();
-    // SAFETY: сегменты и стек отображены user-accessible, селекторы кольца 3 валидны
-    // (RPL=3), стек выровнен. Управление вернётся, когда программа сделает `exit`.
+    // SAFETY: сегменты и стек отображены user-accessible в активной таблице процесса,
+    // селекторы кольца 3 валидны (RPL=3), стек выровнен. Управление вернётся на `exit`.
     unsafe {
         ferros_enter_user(
             entry,
@@ -276,7 +294,12 @@ pub unsafe fn run_user_elf(
             sel.user_data.0 as u64,
         );
     }
-    // Вернулись из кольца 3 с IF=0 — восстановим исходное состояние прерываний.
+
+    // Вернулись из кольца 3 (адресное пространство процесса ещё активно, ядро отображено).
+    // Возвращаем активным адресное пространство ядра.
+    // SAFETY: kernel_pml4 — сохранённый ранее корень таблиц ядра.
+    unsafe { Cr3::write(kernel_pml4, cr3_flags) };
+
     if was_enabled {
         interrupts::enable();
     }

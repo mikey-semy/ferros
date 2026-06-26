@@ -3,8 +3,8 @@
 Each milestone is a complete, observable result ("it now does X") and ends with a
 merged PR. We detail a milestone only when we reach it. Current status: **M5 in
 progress** (M5a — ring 3 + `syscall` round-trip; M5b — Linux-shaped `write`/`exit`;
-M5c1 — load + run a real compiled ELF in ring 3 — done; M0–M4 merged). **Next: M5c2**
-(per-process address spaces; then M5c3 scheduler integration).
+M5c1 — load + run a real ELF; M5c2 — per-process address spaces — done; M0–M4 merged).
+**Next: M5c3** (scheduler integration: processes, CR3-switch on context switch).
 
 > **North star (D8):** run the existing **Linux** software ecosystem rather than write a
 > native app ecosystem from scratch. Long-term aim is **ABI-level** compatibility
