@@ -1,4 +1,4 @@
-//! Библиотека ядра ferros: переиспользуемый код (драйверы, инфраструктура тестов).
+//! Библиотека ядра ferros: переиспользуемый код (драйверы, прерывания, тесты).
 //!
 //! Бинарник (`src/main.rs`) — тонкая точка входа поверх этой библиотеки. Вынос в
 //! библиотеку нужен, чтобы один и тот же код (включая тест-харнесс) могли
@@ -15,13 +15,21 @@
 #![no_std]
 #![cfg_attr(test, no_main)]
 #![feature(custom_test_frameworks)]
+#![feature(abi_x86_interrupt)]
 #![test_runner(crate::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+pub mod interrupts;
 pub mod serial;
 pub mod vga_buffer;
 
 use core::panic::PanicInfo;
+
+/// Инициализация ядра: загружаем IDT (обработчики исключений/прерываний).
+/// Вызывается из `_start` до основной работы.
+pub fn init() {
+    interrupts::init_idt();
+}
 
 /// Idle-цикл: останавливаем CPU до прерывания.
 pub fn hlt_loop() -> ! {
@@ -86,9 +94,11 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
 }
 
 /// Точка входа для `cargo test --lib` (тесты самой библиотеки).
+/// Сначала инициализируем ядро (IDT нужна, чтобы тесты прерываний не падали).
 #[cfg(test)]
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    init();
     test_main();
     hlt_loop()
 }
@@ -114,5 +124,12 @@ mod tests {
         for _ in 0..30 {
             crate::println!("vga scroll test line");
         }
+    }
+
+    /// breakpoint (`int3`) должен быть обработан IDT и вернуть управление —
+    /// если бы обработчика не было, тут был бы тройной сброс CPU.
+    #[test_case]
+    fn breakpoint_exception_returns() {
+        x86_64::instructions::interrupts::int3();
     }
 }
