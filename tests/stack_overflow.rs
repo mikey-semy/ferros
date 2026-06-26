@@ -13,7 +13,8 @@
 #![feature(abi_x86_interrupt)]
 
 use core::panic::PanicInfo;
-use ferros::{exit_qemu, gdt, hlt_loop, serial_print, serial_println, QemuExitCode};
+use ferros::arch::x86_64::gdt;
+use ferros::{exit_qemu, hlt_loop, serial_print, serial_println, QemuExitCode};
 use spin::LazyLock;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 

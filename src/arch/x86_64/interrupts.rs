@@ -8,7 +8,7 @@
 //! - Аппаратные прерывания (M2c): таймер и клавиатура через **PIC 8259**.
 //!   PIC перемаплен на векторы 32..47, чтобы не пересекаться с исключениями CPU.
 
-use crate::gdt;
+use super::gdt;
 use pc_keyboard::{layouts::Us104Key, DecodedKey, HandleControl, PS2Keyboard, ScancodeSet1};
 use pic8259::ChainedPics;
 use spin::{LazyLock, Mutex};
