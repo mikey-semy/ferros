@@ -34,7 +34,8 @@ BIOS  →  bootloader 0.9 (sets up long mode, paging, hands off)
   (`Writer` + `print!`/`println!`); `serial` (hand-written 16550 over port I/O,
   `serial_println!`); a printing panic handler; an in-QEMU test harness
   (`custom_test_frameworks` + isa-debug-exit, `cargo test`).
-- **M2:** `gdt`, `interrupts` (IDT, exception + hardware handlers), PIC.
+- **M2 (done):** `gdt` (GDT/TSS + IST stack), `interrupts` (IDT; breakpoint + double-fault
+  exceptions; PIC-driven timer & keyboard); deadlock-safe printing via `without_interrupts`.
 - **M3:** `memory` (frame allocator, paging), `allocator` (kernel heap).
 - **M4+:** `task`/scheduler, then userspace, drivers, filesystem, networking.
 
