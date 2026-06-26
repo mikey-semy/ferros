@@ -22,6 +22,8 @@ use alloc::vec::Vec;
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use ferros::mm::frame::BootInfoFrameAllocator;
+use ferros::sched::simple_executor::SimpleExecutor;
+use ferros::sched::Task;
 use ferros::{hlt_loop, mm, println, serial_println};
 use x86_64::structures::paging::{Page, Translate};
 use x86_64::VirtAddr;
@@ -102,6 +104,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     let greeting = String::from("heap online: Box + Vec + String work!");
     println!("{greeting}");
 
+    // M4a: кооперативная многозадачность — прогоняем async-задачу через экзекьютор.
+    let mut executor = SimpleExecutor::new();
+    executor.spawn(Task::new(example_task()));
+    executor.run();
+
     println!("ferros ready. Timer ticks below; type on the keyboard:");
 
     // В тестовом режиме сразу запускаем тесты вместо обычной работы.
@@ -109,6 +116,18 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     test_main();
 
     hlt_loop()
+}
+
+/// Простейший async-блок: «асинхронно» отдаёт число (демо M4a).
+async fn async_number() -> u32 {
+    42
+}
+
+/// Пример задачи: дожидается `async_number().await` и печатает результат — видно,
+/// что `.await` и кооперативное исполнение работают.
+async fn example_task() {
+    let number = async_number().await;
+    println!("async task: got {number} from an .await");
 }
 
 /// Обработчик паники в обычном режиме: печатаем причину на экран и в serial.

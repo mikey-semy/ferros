@@ -48,16 +48,16 @@ src/
 │  ├─ vga.rs            VGA text + print!/println! (M1a)
 │  └─ serial.rs         16550 UART on COM1 + serial_println! (M1b)
 ├─ mm/                  memory management — M3 (paging.rs, frame.rs, heap.rs)
-├─ sched/               scheduler & tasks — M4
+├─ sched/               scheduler & tasks — M4 (task + simple_executor; more in M4b)
 ├─ syscall/             syscalls & userspace — M5
 ├─ fs/                  filesystems & VFS — M6
 ├─ net/                 networking — M8
 └─ util/                shared no_std helpers
 ```
 
-`mm` is populated (paging, frame allocator, heap); `sched`/`syscall`/`fs`/`net` are
-still placeholders (doc-only `mod.rs`), filled in at their milestones. Integration
-tests live in `tests/` and link the kernel crate.
+`mm` and `sched` are populated; `syscall`/`fs`/`net` are still placeholders (doc-only
+`mod.rs`), filled in at their milestones. Integration tests live in `tests/` and link
+the kernel crate.
 
 ## Known future migrations
 
