@@ -1,9 +1,9 @@
 # ferros — Roadmap
 
 Each milestone is a complete, observable result ("it now does X") and ends with a
-merged PR. We detail a milestone only when we reach it. Current status: **M4 done**
-(cooperative async — M4a/b/c; preemptive phase 2 — M4d context switch + kernel threads,
-M4e timer preemption; M0–M3 merged). **Next: M5** (userspace + syscalls, ring 3).
+merged PR. We detail a milestone only when we reach it. Current status: **M5 in
+progress** (M5a — ring 3 + the `syscall` round-trip — done; M0–M4 merged). **Next:
+M5b** (Linux-shaped syscall table + first real syscalls `write`/`exit`).
 
 > **North star (D8):** run the existing **Linux** software ecosystem rather than write a
 > native app ecosystem from scratch. Long-term aim is **ABI-level** compatibility
