@@ -60,3 +60,39 @@ Subsystem directories prevent a flat "everything in `src/`" that becomes unnavig
 scale. Short names match Linux/BSD convention and read as professional rather than
 verbose. Shipped as its own `refactor(layout)` change with **no behavior change** (build
 + fmt + clippy green; existing tests compile and pass unchanged).
+
+## D8 — Goal: Linux compatibility (ABI-level north star, POSIX-first path)
+
+**Decision:** ferros aims to **run the existing Linux software ecosystem** rather than
+require a from-scratch native app ecosystem. North star = **ABI-level** compatibility
+(run *unmodified* Linux ELF binaries by emulating the Linux syscall interface). The
+**path** is staged: **source-level POSIX first** — a syscall layer + a ported libc
+(relibc, M9) so programs recompile — then grow that syscall surface toward
+unmodified-binary support. Windows apps are out of scope except via **Wine-class**
+translation layers running on the Linux ABI.
+**Why:** Writing a thousand native apps is infeasible solo; the value is leverage of the
+Linux ecosystem. Source-level is a strict prerequisite for ABI-level (same syscall
+layer), so staging keeps every step independently useful and avoids an all-or-nothing
+bet. The decision bites at **M5** (userspace/syscalls), not before — M0–M4 are
+compatibility-agnostic.
+**Honest caveats:** (1) ABI-level "any Linux binary runs" is a multi-year, hundreds-of-
+syscalls effort (signals, futex, mmap semantics, `/proc`, ioctls). (2) This is **exactly
+[Asterinas](https://github.com/asterinas/asterinas)'s niche** (Rust + Linux-ABI, 230+
+syscalls, USENIX ATC'25) — so "Linux-compatible Rust OS" is a *goal*, **not a
+distinguishing thesis**; a sharper angle (e.g. real-time/determinism) would layer on top
+(still open — see D9 note). (3) **Wine** is among the most demanding hosts; treat it as a
+far aspiration, not a milestone.
+
+## D9 — Unsafe discipline: framekernel-inspired containment (under study)
+
+**Decision (tentative):** Keep `unsafe` **minimal and contained**, and study the
+**framekernel** approach (Asterinas's OSTD): confine all `unsafe` to a small, auditable
+core and write the rest of the kernel in safe Rust. Not adopting a formal OSTD-style
+framework yet — but treat "where does unsafe live" as a deliberate boundary, like the
+`arch` seam (D7), because it is far cheaper to establish early than to retrofit once
+`unsafe` is scattered. Each `unsafe` block already carries a `// SAFETY:` note
+([CONVENTIONS.md](CONVENTIONS.md) §3); this decision is to revisit a stronger containment
+boundary before userspace (M5) accretes much more of it.
+**Why:** Memory-safety is Rust's whole pitch for an OS; an explicit `unsafe` boundary is
+the difference between "Rust kernel" and "kernel that happens to be in Rust." Recorded as
+*under study* rather than committed, since a full framekernel is a research-grade effort.
