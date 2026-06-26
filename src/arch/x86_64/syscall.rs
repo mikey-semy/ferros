@@ -164,31 +164,6 @@ core::arch::global_asm!(
     resume = sym KERNEL_RESUME_RSP,
 );
 
-// Первая пользовательская программа (M5b): крошечный позиционно-независимый код (только
-// immediate'ы и `syscall`), который мы КОПИРУЕМ в пользовательскую страницу. Делает
-// настоящие Linux-вызовы: `write(1, msg, len)` (печатает строку из памяти пользователя),
-// затем `exit(0)` (ядро раскручивается обратно в вызвавший контекст). Хвостовой `jmp` —
-// страховка: `exit` не возвращается.
-core::arch::global_asm!(
-    ".global ferros_user_hello_start",
-    "ferros_user_hello_start:",
-    "    mov eax, {sys_write}", // nr = write
-    "    mov edi, 1",           // fd = stdout
-    "    mov esi, {msg_va}",    // buf
-    "    mov edx, {msg_len}",   // count
-    "    syscall",
-    "    mov eax, {sys_exit}", // nr = exit
-    "    mov edi, 0",          // status = 0
-    "    syscall",
-    "2:  jmp 2b",
-    ".global ferros_user_hello_end",
-    "ferros_user_hello_end:",
-    sys_write = const crate::syscall::abi::SYS_WRITE as i32,
-    sys_exit = const crate::syscall::abi::SYS_EXIT as i32,
-    msg_va = const USER_DATA_VA as i32,
-    msg_len = const HELLO_MSG.len() as i32,
-);
-
 extern "C" {
     fn ferros_syscall_entry();
     /// Прыгает в кольцо 3 на `entry` с пользовательским стеком; «возвращается», когда
@@ -197,8 +172,6 @@ extern "C" {
     /// Восстанавливает контекст ядра, сохранённый [`ferros_enter_user`], и возвращается
     /// туда. Вызвавшему (диспетчеру) управление НЕ возвращает — отсюда тип `-> !`.
     fn ferros_resume_kernel() -> !;
-    fn ferros_user_hello_start();
-    fn ferros_user_hello_end();
 }
 
 /// Glue между голым трамплином и переносимым диспетчером: распаковывает [`SyscallRegs`],
@@ -257,70 +230,47 @@ pub fn init() {
     SYSCALL_KERNEL_RSP.store(top & !0xF, Ordering::SeqCst);
 }
 
-/// Виртуальный адрес страницы кода пользователя (нижняя половина — пользовательская часть
-/// адресного пространства; в M5c у процессов будут свои таблицы).
-pub const USER_CODE_VA: u64 = 0x4000_0000;
-/// Виртуальный адрес страницы стека пользователя.
+/// Виртуальный адрес страницы стека пользователя (нижняя половина — пользовательская часть
+/// адресного пространства; в M5c2 у процессов будут свои таблицы). Код/данные программы
+/// кладутся по адресам из её ELF (у `user/hello` — от `0x40_0000`), далеко от стека.
 pub const USER_STACK_VA: u64 = 0x4010_0000;
-/// Виртуальный адрес страницы данных пользователя (туда кладём строку для `write`).
-pub const USER_DATA_VA: u64 = 0x4020_0000;
-/// Строка, которую первая пользовательская программа печатает через `write` (M5b).
-pub const HELLO_MSG: &[u8] = b"hello from ring 3\n";
 
-/// Запускает первую пользовательскую программу (M5b): маппит страницы кода/стека/данных,
-/// копирует туда код и строку, прыгает в кольцо 3. Программа печатает [`HELLO_MSG`] через
-/// настоящий `write` и завершается `exit` — тогда управление возвращается сюда. Возвращает
-/// вершину пользовательского стека (тест сверяет с ней зафиксированный `user_rsp`).
+/// Загружает и запускает пользовательскую программу из её ELF-образа (M5c1): разбирает и
+/// маппит сегменты ([`crate::syscall::elf::load`]), отводит страницу под стек, прыгает в
+/// кольцо 3 на точку входа. Программа делает свои системные вызовы и завершается `exit` —
+/// тогда управление возвращается сюда. Возвращает вершину пользовательского стека (тест
+/// сверяет с ней зафиксированный `user_rsp`).
 ///
-/// Маппинг идёт в активную (ядровую) таблицу: отдельного адресного пространства ещё нет
-/// (M5c), а нижняя половина у ядра свободна. Состояние прерываний (IF) сохраняется и
+/// Загрузка идёт в активную (ядровую) таблицу: отдельного адресного пространства ещё нет
+/// (M5c2), а нижняя половина у ядра свободна. Состояние прерываний (IF) сохраняется и
 /// восстанавливается: в кольцо 3 входим с IF=0 и обратно приходим с IF=0.
 ///
 /// # Safety
 /// Вызывать с корректными `mapper`/`frame_allocator` для активной таблицы и поднятой
-/// кучей. `USER_CODE_VA`/`USER_STACK_VA`/`USER_DATA_VA` должны быть не отображены (иначе
-/// `map_to` запаникует).
-pub unsafe fn run_user_hello(
+/// кучей. Адреса сегментов ELF и `USER_STACK_VA` должны быть не отображены (иначе `map_to`
+/// запаникует).
+///
+/// # Panics
+/// Если ELF не загрузился ([`crate::syscall::elf::load`] вернул ошибку).
+pub unsafe fn run_user_elf(
+    elf_bytes: &[u8],
     mapper: &mut OffsetPageTable,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) -> u64 {
-    for va in [USER_CODE_VA, USER_STACK_VA, USER_DATA_VA] {
-        let page = Page::containing_address(VirtAddr::new(va));
-        crate::mm::paging::map_user_page(page, mapper, frame_allocator);
-    }
+    let entry = crate::syscall::elf::load(elf_bytes, mapper, frame_allocator)
+        .expect("failed to load user ELF");
 
-    // Копируем код программы из .text ядра в пользовательскую страницу. Он позиционно-
-    // независим (immediate'ы + syscall), поэтому копирование безопасно.
-    let start = ferros_user_hello_start as *const () as usize;
-    let end = ferros_user_hello_end as *const () as usize;
-    let len = end - start;
-    // Код и строка копируются каждый в ОДНУ страницу — обязаны влезать, иначе copy ушёл
-    // бы за её пределы (в следующую, неотображённую страницу → page fault).
-    assert!(len <= 4096, "ring-3 program does not fit in one page");
-    assert!(
-        HELLO_MSG.len() <= 4096,
-        "hello message does not fit in one page"
-    );
-    // SAFETY: src — диапазоны в ядре (.text и .rodata); dst — только что отображённые
-    // пользовательские страницы (присутствуют, доступны на запись из кольца 0); длины
-    // проверены выше.
-    unsafe {
-        core::ptr::copy_nonoverlapping(start as *const u8, USER_CODE_VA as *mut u8, len);
-        core::ptr::copy_nonoverlapping(
-            HELLO_MSG.as_ptr(),
-            USER_DATA_VA as *mut u8,
-            HELLO_MSG.len(),
-        );
-    }
-
+    let stack_page = Page::containing_address(VirtAddr::new(USER_STACK_VA));
+    crate::mm::paging::map_user_page(stack_page, mapper, frame_allocator);
     let user_stack_top = USER_STACK_VA + 4096;
+
     let sel = gdt::selectors();
     let was_enabled = interrupts::are_enabled();
-    // SAFETY: страницы отображены user-accessible, селекторы кольца 3 валидны (RPL=3),
-    // стек выровнен. Управление вернётся, когда программа сделает `exit`.
+    // SAFETY: сегменты и стек отображены user-accessible, селекторы кольца 3 валидны
+    // (RPL=3), стек выровнен. Управление вернётся, когда программа сделает `exit`.
     unsafe {
         ferros_enter_user(
-            USER_CODE_VA,
+            entry,
             user_stack_top,
             sel.user_code.0 as u64,
             sel.user_data.0 as u64,
