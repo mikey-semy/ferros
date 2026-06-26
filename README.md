@@ -26,7 +26,8 @@ cargo run     # builds the kernel image and boots it in QEMU
 
 ## Documentation
 
-- [Roadmap](docs/ROADMAP.md) — milestones M0 → M12
+- [Roadmap](docs/ROADMAP.md) — milestones M0 → M12 (depth)
+- [Landscape](docs/LANDSCAPE.md) — alternatives at each layer (breadth)
 - [Architecture](docs/ARCHITECTURE.md) — current design
 - [Decisions](docs/DECISIONS.md) — decision log (ADR-style)
 - [Contributing / workflow](docs/CONTRIBUTING.md) — branching, commits, local CI
