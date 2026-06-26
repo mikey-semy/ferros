@@ -9,7 +9,6 @@
 //!   PIC перемаплен на векторы 32..47, чтобы не пересекаться с исключениями CPU.
 
 use super::gdt;
-use pc_keyboard::{layouts::Us104Key, DecodedKey, HandleControl, PS2Keyboard, ScancodeSet1};
 use pic8259::ChainedPics;
 use spin::{LazyLock, Mutex};
 use x86_64::instructions::port::Port;
@@ -84,31 +83,15 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
-/// Глобальный декодер PS/2-клавиатуры (раскладка US, scancode set 1).
-static KEYBOARD: LazyLock<Mutex<PS2Keyboard<Us104Key, ScancodeSet1>>> = LazyLock::new(|| {
-    Mutex::new(PS2Keyboard::new(
-        ScancodeSet1::new(),
-        Us104Key,
-        HandleControl::Ignore,
-    ))
-});
-
-/// Обработчик клавиатуры. Читает скан-код из порта `0x60`, декодирует и печатает
-/// символ.
+/// Обработчик клавиатуры. Читает скан-код из порта `0x60` и отдаёт его драйверу
+/// клавиатуры (M4c): тот кладёт байт в очередь и будит async-задачу-декодер. Здесь —
+/// только короткая работа, как и положено обработчику прерывания (декодирование с
+/// аллокациями в ISR недопустимо).
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     let mut port = Port::new(0x60);
     // SAFETY: 0x60 — порт данных PS/2-контроллера клавиатуры.
     let scancode: u8 = unsafe { port.read() };
-
-    let mut keyboard = KEYBOARD.lock();
-    if let Ok(Some(event)) = keyboard.add_byte(scancode) {
-        if let Some(key) = keyboard.process_keyevent(event) {
-            match key {
-                DecodedKey::Unicode(c) => crate::print!("{c}"),
-                DecodedKey::RawKey(k) => crate::print!("{k:?}"),
-            }
-        }
-    }
+    crate::drivers::keyboard::add_scancode(scancode);
 
     // SAFETY: вектор корректен.
     unsafe {
