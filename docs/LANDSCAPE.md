@@ -68,7 +68,20 @@ kernel (scheduler, filesystem, etc.) is mostly portable.
 |---|---|---|
 | **Monolithic** | Drivers in the kernel. Simpler, faster to build; the Linux path. | **current** |
 | **Microkernel** | Tiny kernel; drivers in userspace (Redox, seL4). Safer/isolated, but slower and more complex. | — |
+| **Framekernel** | Monolithic performance + intra-kernel privilege separation: all `unsafe` confined to a tiny audited core (Asterinas's OSTD), the rest is safe Rust. | **under study (D9)** |
 | **Hybrid / unikernel / exokernel** | Other points in the design space (e.g. macOS XNU is hybrid; unikernels bundle one app + kernel). | — |
+
+## 7. Rust OS landscape — who's already here
+
+Worth knowing, both as prior art and as honest competitive context (our goal is Linux
+compatibility, **D8** — which is a goal, not a distinguishing thesis):
+
+| Project | What it is | Why it matters to us |
+|---|---|---|
+| **Asterinas** | Linux **ABI-compatible** kernel in safe Rust; **framekernel** (unsafe confined to OSTD, ~14% TCB); 230+ Linux syscalls; perf on par with Linux; USENIX ATC'25, aiming production for x86-64 VMs. | The benchmark for "Rust + Linux-compatible." The exact niche we'd enter — so we don't win on "general-purpose"; the OSTD unsafe-containment idea is worth borrowing (D9). |
+| **Redox** | Microkernel OS in Rust with its own POSIX userland (`relibc`). | Source-level POSIX done seriously; `relibc` is our candidate libc (M9). |
+| **Theseus** | Research OS, single address space, intralingual design. | A radically different point in the design space; ideas, not a path. |
+| **Hubris** (Oxide) | Small, statically-defined RTOS in Rust; **not** Linux-compatible. | If a real-time thesis is ever chosen, this is the closest reference. |
 
 ---
 
