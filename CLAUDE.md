@@ -28,6 +28,9 @@ truth for how we work in this repository.**
    in code. Keep tidy; update the milestone journal in `docs/journal/` as we go.
 6. **One milestone at a time.** Each milestone = a working, observable result and
    a merged PR. Detail each milestone only when we reach it.
+7. **Teach as we go.** This is also a learning project for the author. Explain the
+   *why* behind each piece at a beginner-friendly level (the concept + the hardware/OS
+   background, not just the change) — both in chat and in code doc-comments.
 
 ## Layout
 
