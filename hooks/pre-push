@@ -1,0 +1,17 @@
+#!/bin/sh
+# ferros local CI — runs before every `git push`. See docs/CONTRIBUTING.md.
+# Activate once per clone with:  git config core.hooksPath hooks
+set -e
+
+echo "[pre-push] cargo fmt --check"
+cargo fmt --check
+
+echo "[pre-push] cargo clippy -- -D warnings"
+cargo clippy -- -D warnings
+
+echo "[pre-push] cargo build"
+cargo build
+
+# cargo test will be added here at M1, once the QEMU test harness exists.
+
+echo "[pre-push] all checks passed"

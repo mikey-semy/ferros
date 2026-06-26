@@ -57,11 +57,17 @@ A `pre-push` git hook runs the same checks CI would:
 cargo fmt --check
 cargo clippy -- -D warnings
 cargo build
-cargo test
+# cargo test          # added at M1, once the QEMU test harness exists
 ```
 
-If any step fails, the push is rejected. (Installed under `.git/hooks/pre-push`;
-the source of truth lives in `docs/` / a tracked `hooks/` dir so it can be reinstalled.)
+The hook is version-controlled in the tracked `hooks/` directory. Activate it once
+per clone with:
+
+```sh
+git config core.hooksPath hooks
+```
+
+If any step fails, the push is rejected. Do not bypass it with `--no-verify`.
 
 ## Documentation
 
