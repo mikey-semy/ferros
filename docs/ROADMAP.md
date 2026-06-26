@@ -1,8 +1,8 @@
 # ferros — Roadmap
 
 Each milestone is a complete, observable result ("it now does X") and ends with a
-merged PR. We detail a milestone only when we reach it. Current status: **M3 next**
-(M0–M2 are done).
+merged PR. We detail a milestone only when we reach it. Current status: **M3 in
+progress** (M3a — paging/address translation — done; M0–M2 merged).
 
 > This is **depth** (the path forward). For **breadth** — alternatives at each layer
 > (firmware, bootloader, runner, architecture, display) and where we could branch out
@@ -12,7 +12,7 @@ merged PR. We detail a milestone only when we reach it. Current status: **M3 nex
 
 - **M0 — Environment + first boot.** Toolchain (nightly), QEMU, custom target,
   `no_std`/`no_main`, bootloader, text on screen → QEMU shows `ferros booting...`.
-  Git + private GitHub repo + local CI skeleton. **← current**
+  Git + private GitHub repo + local CI skeleton.
 - **M1 — Kernel infrastructure.** VGA buffer abstraction, `print!`/`println!`,
   serial output (for tests), panic handler, QEMU exit, integration-test framework.
 

@@ -11,7 +11,12 @@ publish = false
 [dependencies]
 # Классический BIOS-bootloader из экосистемы blog_os. Совместим с `bootimage` 0.10.x.
 # Миграцию на bootloader 0.11 (BIOS+UEFI) планируем на этапе M11.
-bootloader = "0.9.23"
+#
+# Фича `map_physical_memory` (M3a): bootloader заранее отображает ВСЮ физическую
+# память в виртуальное пространство по фиксированному оффсету и кладёт этот оффсет
+# в `BootInfo::physical_memory_offset`. Так ядро может читать любой физический адрес
+# (включая сами таблицы страниц) по формуле virt = phys + offset.
+bootloader = { version = "0.9.23", features = ["map_physical_memory"] }
 
 # Спин-блокировка для глобальных Writer'ов (VGA и serial): на голом железе нет
 # ОС, которая усыпит поток, поэтому замок «крутится» в цикле. `Mutex::new` — const.
