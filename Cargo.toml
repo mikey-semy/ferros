@@ -1,0 +1,14 @@
+[package]
+name = "ferros"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mikhail Toshkin <toshkin.mikhail@gmail.com>"]
+description = "ferros — an operating system written from scratch in Rust (x86_64, monolithic kernel)"
+license-file = "LICENSE"
+readme = "README.md"
+publish = false
+
+[dependencies]
+# Классический BIOS-bootloader из экосистемы blog_os. Совместим с `bootimage` 0.10.x.
+# Миграцию на bootloader 0.11 (BIOS+UEFI) планируем на этапе M11.
+bootloader = "0.9.23"
