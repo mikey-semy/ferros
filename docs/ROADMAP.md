@@ -2,8 +2,8 @@
 
 Each milestone is a complete, observable result ("it now does X") and ends with a
 merged PR. We detail a milestone only when we reach it. Current status: **M4 in
-progress** (cooperative async done — M4a tasks, M4b executor, M4c async keyboard;
-preemptive multitasking is the remaining M4 phase 2; M0–M3 merged).
+progress** (cooperative async done — M4a/b/c; preemptive phase 2 underway — M4d context
+switch + kernel threads done, M4e timer preemption next; M0–M3 merged).
 
 > This is **depth** (the path forward). For **breadth** — alternatives at each layer
 > (firmware, bootloader, runner, architecture, display) and where we could branch out

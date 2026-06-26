@@ -43,12 +43,14 @@ src/
 │  ├─ mod.rs            cfg-routed arch::init()
 │  └─ x86_64/
 │     ├─ gdt.rs         GDT/TSS + IST stack (M2b)
-│     └─ interrupts.rs  IDT; breakpoint + double fault; PIC timer & keyboard (M2a/c)
+│     ├─ interrupts.rs  IDT; breakpoint + double fault; PIC timer & keyboard (M2a/c)
+│     └─ context.rs     kernel-thread context switch (M4d)
 ├─ drivers/             device drivers
 │  ├─ vga.rs            VGA text + print!/println! (M1a)
-│  └─ serial.rs         16550 UART on COM1 + serial_println! (M1b)
+│  ├─ serial.rs         16550 UART on COM1 + serial_println! (M1b)
+│  └─ keyboard.rs       async keyboard — scancode stream (M4c)
 ├─ mm/                  memory management — M3 (paging.rs, frame.rs, heap.rs)
-├─ sched/               scheduler & tasks — M4 (task + simple_executor; more in M4b)
+├─ sched/               tasks & threads — M4 (async executor + kernel-thread scheduler)
 ├─ syscall/             syscalls & userspace — M5
 ├─ fs/                  filesystems & VFS — M6
 ├─ net/                 networking — M8
