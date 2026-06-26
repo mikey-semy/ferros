@@ -2,7 +2,7 @@
 
 Each milestone is a complete, observable result ("it now does X") and ends with a
 merged PR. We detail a milestone only when we reach it. Current status: **M4 in
-progress** (M4a — cooperative async/await tasks + a simple executor — done; M0–M3 merged).
+progress** (M4a async tasks + M4b waker-driven executor done; M4c async keyboard next; M0–M3 merged).
 
 > This is **depth** (the path forward). For **breadth** — alternatives at each layer
 > (firmware, bootloader, runner, architecture, display) and where we could branch out

@@ -22,9 +22,9 @@ use alloc::vec::Vec;
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use ferros::mm::frame::BootInfoFrameAllocator;
-use ferros::sched::simple_executor::SimpleExecutor;
+use ferros::sched::executor::Executor;
 use ferros::sched::Task;
-use ferros::{hlt_loop, mm, println, serial_println};
+use ferros::{mm, println, serial_println};
 use x86_64::structures::paging::{Page, Translate};
 use x86_64::VirtAddr;
 
@@ -104,18 +104,17 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     let greeting = String::from("heap online: Box + Vec + String work!");
     println!("{greeting}");
 
-    // M4a: кооперативная многозадачность — прогоняем async-задачу через экзекьютор.
-    let mut executor = SimpleExecutor::new();
-    executor.spawn(Task::new(example_task()));
-    executor.run();
-
     println!("ferros ready. Timer ticks below; type on the keyboard:");
 
     // В тестовом режиме сразу запускаем тесты вместо обычной работы.
     #[cfg(test)]
     test_main();
 
-    hlt_loop()
+    // M4b: эффективный экзекьютор — это и есть «жизнь» ядра после старта. Он гоняет
+    // async-задачи, а когда делать нечего — спит на `hlt` (CPU не жжёт впустую).
+    let mut executor = Executor::new();
+    executor.spawn(Task::new(example_task()));
+    executor.run()
 }
 
 /// Простейший async-блок: «асинхронно» отдаёт число (демо M4a).
@@ -136,7 +135,7 @@ async fn example_task() {
 fn panic(info: &PanicInfo) -> ! {
     println!("KERNEL PANIC: {info}");
     serial_println!("KERNEL PANIC: {info}");
-    hlt_loop()
+    ferros::hlt_loop()
 }
 
 /// В тестовом режиме паника означает провал теста — делегируем в библиотеку.

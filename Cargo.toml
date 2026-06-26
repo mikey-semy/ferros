@@ -38,6 +38,10 @@ pc-keyboard = "0.9"
 # аллокацию: для bring-up достаточно, быстрый fixed-size-block — в HARDENING.md.
 linked_list_allocator = "0.10"
 
+# Лок-фри очередь фиксированного размера (`ArrayQueue`) для очереди «разбуженных»
+# задач в эффективном экзекьюторе (M4b). Берём без std: только `alloc`.
+crossbeam-queue = { version = "0.3", default-features = false, features = ["alloc"] }
+
 [package.metadata.bootimage]
 # Тестовый режим QEMU: устройство isa-debug-exit (ядро само завершит QEMU кодом
 # успех/провал), вывод тестов в serial → stdio, без окна.
