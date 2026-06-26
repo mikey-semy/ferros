@@ -32,6 +32,10 @@ use core::panic::PanicInfo;
 pub fn init() {
     gdt::init();
     interrupts::init_idt();
+    // SAFETY: PIC перемаплен на безопасные векторы (32..47), см. interrupts.rs.
+    unsafe { interrupts::PICS.lock().initialize() };
+    // `sti` — с этого момента ядро реагирует на таймер и клавиатуру.
+    x86_64::instructions::interrupts::enable();
 }
 
 /// Idle-цикл: останавливаем CPU до прерывания.

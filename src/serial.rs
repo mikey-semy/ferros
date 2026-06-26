@@ -113,7 +113,11 @@ static SERIAL1: LazyLock<Mutex<SerialPort>> = LazyLock::new(|| {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    SERIAL1.lock().write_fmt(args).expect("serial write failed");
+    // Тот же приём против дедлока, что и в vga_buffer: на время вывода в COM1
+    // выключаем прерывания.
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        SERIAL1.lock().write_fmt(args).expect("serial write failed");
+    });
 }
 
 /// Печать в serial без перевода строки.
