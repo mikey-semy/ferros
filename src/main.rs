@@ -24,8 +24,8 @@ use core::panic::PanicInfo;
 use ferros::drivers::keyboard;
 use ferros::mm::frame::BootInfoFrameAllocator;
 use ferros::sched::executor::Executor;
-use ferros::sched::Task;
-use ferros::{mm, println, serial_println};
+use ferros::sched::{thread, Task};
+use ferros::{mm, print, println, serial_println};
 use x86_64::structures::paging::{Page, Translate};
 use x86_64::VirtAddr;
 
@@ -108,18 +108,58 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     let greeting = String::from("heap online: Box + Vec + String work!");
     println!("{greeting}");
 
-    println!("ferros ready. Timer ticks below; type on the keyboard:");
-
-    // В тестовом режиме сразу запускаем тесты вместо обычной работы.
+    // В тестовом режиме сразу запускаем тесты вместо обычной работы (демо ниже до этого
+    // момента не доходит — `test_main` завершает QEMU, так что вытеснение в тестах bin
+    // не включается; настоящий тест вытеснения — в `tests/preemption.rs`).
     #[cfg(test)]
     test_main();
 
+    // M4e: вытесняющая многозадачность. Заводим планировщик потоков ядра и пару фоновых
+    // потоков, которые НИЧЕГО не уступают — крутят `loop {}` и печатают «сердцебиение».
+    // Включаем вытеснение по таймеру: теперь таймер сам переключает потоки, и одно ядро
+    // честно делят фоновые потоки + executor (он гоняет async-задачи на «нулевом»
+    // потоке). Зависший в цикле поток больше не захватит CPU.
+    thread::init();
+    thread::spawn(worker_a);
+    thread::spawn(worker_b);
+    thread::start_preemption();
+
+    println!("ferros ready. Background threads A/B run preemptively; type on the keyboard:");
+
     // M4b: эффективный экзекьютор — это и есть «жизнь» ядра после старта. Он гоняет
-    // async-задачи, а когда делать нечего — спит на `hlt` (CPU не жжёт впустую).
+    // async-задачи, а когда делать нечего — спит на `hlt` (CPU не жжёт впустую). Теперь
+    // он крутится на «нулевом» потоке, который таймер тоже вытесняет в пользу A/B.
     let mut executor = Executor::new();
     executor.spawn(Task::new(example_task()));
     executor.spawn(Task::new(keyboard::print_keypresses()));
     executor.run()
+}
+
+/// Грубая активная задержка: крутит `pause`-цикл, чтобы «сердцебиение» фоновых потоков
+/// было видно глазами, а не пролетало 18 раз в секунду. Точное время не важно (это
+/// демо); важно, что поток занят и НЕ уступает сам — уступить его заставит таймер.
+fn busy_delay() {
+    for _ in 0..30_000_000u64 {
+        core::hint::spin_loop();
+    }
+}
+
+/// Фоновый поток A: бесконечно печатает `A`, ни разу не уступая добровольно. Его
+/// вытесняет таймер — иначе он бы навсегда захватил CPU и `B` никогда бы не напечатал.
+extern "C" fn worker_a() -> ! {
+    loop {
+        print!("A");
+        busy_delay();
+    }
+}
+
+/// Фоновый поток B: то же, что A, но печатает `B`. На экране A и B чередуются —
+/// доказательство, что таймер переключает потоки помимо их воли (M4e).
+extern "C" fn worker_b() -> ! {
+    loop {
+        print!("B");
+        busy_delay();
+    }
 }
 
 /// Простейший async-блок: «асинхронно» отдаёт число (демо M4a).
