@@ -11,10 +11,14 @@
 extern crate alloc;
 
 use bootloader::{entry_point, BootInfo};
+use core::future::Future;
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::pin::Pin;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::task::{Context, Poll};
 use ferros::mm::frame::BootInfoFrameAllocator;
 use ferros::mm::{heap, paging};
+use ferros::sched::executor::Executor;
 use ferros::sched::simple_executor::SimpleExecutor;
 use ferros::sched::Task;
 use x86_64::VirtAddr;
@@ -46,12 +50,53 @@ async fn write_result() {
     RESULT.store(42, Ordering::SeqCst);
 }
 
-/// Экзекьютор должен опросить задачу до `Poll::Ready` — тогда `RESULT` станет 42.
+/// `SimpleExecutor` (M4a) должен опросить задачу до `Poll::Ready` — `RESULT` станет 42.
 #[test_case]
-fn executor_runs_task_to_completion() {
+fn simple_executor_runs_task_to_completion() {
     RESULT.store(0, Ordering::SeqCst);
     let mut executor = SimpleExecutor::new();
     executor.spawn(Task::new(write_result()));
     executor.run();
     assert_eq!(RESULT.load(Ordering::SeqCst), 42);
+}
+
+/// Флаг, который задача выставляет после того, как один раз уступила управление.
+static YIELDED_DONE: AtomicBool = AtomicBool::new(false);
+
+/// Future, который на первом опросе возвращает `Pending` (разбудив себя через waker),
+/// а на втором — `Ready`. Минимальный способ проверить весь путь пробуждения.
+struct YieldOnce {
+    yielded: bool,
+}
+
+impl Future for YieldOnce {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.yielded {
+            Poll::Ready(())
+        } else {
+            self.yielded = true;
+            cx.waker().wake_by_ref(); // кладём свой id обратно в очередь готовых
+            Poll::Pending
+        }
+    }
+}
+
+async fn yielding_task() {
+    YieldOnce { yielded: false }.await;
+    YIELDED_DONE.store(true, Ordering::SeqCst);
+}
+
+/// Эффективный `Executor` (M4b) должен довести до конца задачу, которая один раз
+/// уступила управление: её waker возвращает id в очередь, и повторный опрос даёт
+/// `Ready`. Одного прохода `run_ready_tasks` достаточно — self-wake кладёт id обратно
+/// в ту же очередь, которую проход и опустошает.
+#[test_case]
+fn executor_runs_yielding_task() {
+    YIELDED_DONE.store(false, Ordering::SeqCst);
+    let mut executor = Executor::new();
+    executor.spawn(Task::new(yielding_task()));
+    executor.run_ready_tasks();
+    assert!(YIELDED_DONE.load(Ordering::SeqCst));
 }
