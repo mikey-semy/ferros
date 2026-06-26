@@ -30,8 +30,10 @@ BIOS  →  bootloader 0.9 (sets up long mode, paging, hands off)
 
 ## Planned structure (next milestones)
 
-- **M1:** `vga_buffer` (a `Writer` + `print!`/`println!`), `serial` (COM1, for test
-  output), panic handler that prints, QEMU exit device for tests.
+- **M1 (done):** library/binary split (`src/lib.rs` + thin `src/main.rs`); `vga_buffer`
+  (`Writer` + `print!`/`println!`); `serial` (hand-written 16550 over port I/O,
+  `serial_println!`); a printing panic handler; an in-QEMU test harness
+  (`custom_test_frameworks` + isa-debug-exit, `cargo test`).
 - **M2:** `gdt`, `interrupts` (IDT, exception + hardware handlers), PIC.
 - **M3:** `memory` (frame allocator, paging), `allocator` (kernel heap).
 - **M4+:** `task`/scheduler, then userspace, drivers, filesystem, networking.

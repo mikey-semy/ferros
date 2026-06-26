@@ -1,26 +1,21 @@
-//! Ядро ferros — точка входа.
+//! ferros — тонкая точка входа поверх библиотеки [`ferros`](../ferros/index.html).
 //!
-//! M0: минимальное загружаемое ядро на голом железе — `no_std` (без стандартной
-//! библиотеки) и `no_main` (без обычной `main` и рантайма). Bootloader передаёт
-//! управление по символу `_start`.
+//! Вся «начинка» (драйверы VGA/serial, инфраструктура тестов) живёт в `src/lib.rs`.
+//! Здесь — только загрузочный `_start`, обработчик паники и приветствие.
 //!
-//! M1a: вывод на экран идёт через модуль [`vga_buffer`] и макрос `println!`.
-//! M1b: добавлен модуль [`serial`] — вывод в COM1 (`serial_println!`) для отладки
-//! и тестов, а panic-handler теперь печатает причину паники.
+//! M0: загрузка. M1a: VGA + `println!`. M1b: serial + печать паники.
+//! M1c: код вынесен в библиотеку, добавлен тест-фреймворк (`cargo test` в QEMU).
 
 #![no_std]
 #![no_main]
-
-mod serial;
-mod vga_buffer;
+#![feature(custom_test_frameworks)]
+#![test_runner(ferros::test_runner)]
+#![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
+use ferros::{hlt_loop, println, serial_println};
 
-/// Точка входа ядра.
-///
-/// Bootloader (крейт `bootloader` 0.9) ищет символ `_start` и прыгает сюда.
-/// Возврата быть не может — отсюда тип `-> !`. `#[no_mangle]` сохраняет имя
-/// символа, `extern "C"` задаёт C-ABI, которое ожидает загрузчик.
+/// Точка входа ядра. Bootloader (`bootloader` 0.9) прыгает на символ `_start`.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     println!("ferros booting...");
@@ -28,28 +23,29 @@ pub extern "C" fn _start() -> ! {
 
     serial_println!("[serial] ferros COM1 online — debug channel ready");
 
-    halt_loop();
+    // В тестовом режиме сразу запускаем тесты вместо обычной работы.
+    #[cfg(test)]
+    test_main();
+
+    hlt_loop()
 }
 
-/// Обработчик паники. На голом железе стандартного нет — обязаны определить свой.
-/// Печатаем причину и на экран (VGA), и в serial.
+/// Обработчик паники в обычном режиме: печатаем причину на экран и в serial.
 ///
-/// Замечание: пока что вызов `println!`/`serial_println!` из паники теоретически
-/// может попасть на уже захваченный замок. В M2 (с прерываниями) обернём вывод
-/// в `without_interrupts`, чтобы исключить дедлок.
+/// Замечание: вызов `println!`/`serial_println!` из паники теоретически может
+/// попасть на уже захваченный замок. В M2 (с прерываниями) обернём это в
+/// `without_interrupts`, чтобы исключить дедлок.
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     println!("KERNEL PANIC: {info}");
     serial_println!("KERNEL PANIC: {info}");
-    halt_loop();
+    hlt_loop()
 }
 
-/// Бесконечный idle: останавливаем CPU инструкцией `hlt` до следующего
-/// прерывания. Это эффективнее «горячего» `loop {}` — процессор не греется впустую.
-fn halt_loop() -> ! {
-    loop {
-        // SAFETY: `hlt` — привилегированная инструкция ожидания прерывания,
-        // безопасная в контексте ядра.
-        unsafe { core::arch::asm!("hlt") };
-    }
+/// В тестовом режиме паника означает провал теста — делегируем в библиотеку.
+#[cfg(test)]
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    ferros::test_panic_handler(info)
 }

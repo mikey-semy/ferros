@@ -12,6 +12,9 @@ cargo clippy -- -D warnings
 echo "[pre-push] cargo build"
 cargo build
 
-# cargo test will be added here at M1, once the QEMU test harness exists.
+# `cargo test` runs the kernel's tests inside QEMU; make sure QEMU is on PATH.
+export PATH="$HOME/qemu:$PATH"
+echo "[pre-push] cargo test"
+cargo test
 
 echo "[pre-push] all checks passed"
