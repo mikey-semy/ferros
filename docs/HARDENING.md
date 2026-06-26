@@ -76,6 +76,15 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
 - **Bootstrap ring-3 entry is one-shot.** `enter_user`/`resume_kernel` do a single
   kernel→user→kernel excursion via a global saved RSP; real scheduling of user threads
   (timer-preempted ring 3 via `rsp0`, many processes) lands in M5c.
+- **`sysretq` to a non-canonical RIP (CVE-2012-0217 class).** The syscall return path
+  `sysretq`s to `rcx` = the user RIP. In M5a `rcx` is hardware-set to the (canonical) user
+  return address, so it's safe. Once user RIP can be set indirectly (signals/`sigreturn`,
+  `ptrace`, exec of arbitrary entry) the kernel must reject non-canonical user RIPs (or
+  return via `iretq`, which faults in *user* context instead of #GP-ing in ring 0).
+- **Page-fault handler not on an IST stack.** It runs on the current kernel stack and only
+  reads `CR2` today (safe). When M5c extends it to inspect user memory, a fault *inside*
+  the handler could recurse on the same stack — give `#PF` its own IST entry (like
+  `#DF`) or keep the handler strictly memory-access-free.
 
 ## Cross-cutting (whole kernel)
 
