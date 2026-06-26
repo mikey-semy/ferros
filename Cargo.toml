@@ -42,6 +42,10 @@ linked_list_allocator = "0.10"
 # задач в эффективном экзекьюторе (M4b). Берём без std: только `alloc`.
 crossbeam-queue = { version = "0.3", default-features = false, features = ["alloc"] }
 
+# Примитивы async: трейт `Stream` (+ `StreamExt::next`) и `AtomicWaker` для
+# async-клавиатуры (M4c) — поток скан-кодов как задача. Без std: только `alloc`.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+
 [package.metadata.bootimage]
 # Тестовый режим QEMU: устройство isa-debug-exit (ядро само завершит QEMU кодом
 # успех/провал), вывод тестов в serial → stdio, без окна.
