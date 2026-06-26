@@ -28,8 +28,11 @@
 
 use x86_64::{
     registers::control::Cr3,
-    structures::paging::{OffsetPageTable, PageTable},
-    VirtAddr,
+    structures::paging::{
+        FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame,
+        Size4KiB,
+    },
+    PhysAddr, VirtAddr,
 };
 
 /// Инициализирует [`OffsetPageTable`] над активной иерархией таблиц.
@@ -67,4 +70,30 @@ unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut
     let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
 
     &mut *page_table_ptr
+}
+
+/// Демонстрация M3b: создаёт новый маппинг — отображает виртуальную страницу `page`
+/// на физический фрейм VGA-буфера (`0xb8000`). После этого запись по любому адресу
+/// внутри `page` попадёт прямо в видеопамять — наглядно доказывает, что мы умеем
+/// сами менять таблицы страниц.
+///
+/// `map_to` при необходимости выделяет до трёх фреймов под промежуточные таблицы —
+/// поэтому ей нужен `frame_allocator`. Возвращённый «флаг» сбрасываем (`flush`),
+/// чтобы CPU перечитал маппинг из таблиц, а не из TLB-кеша.
+///
+/// Только для демонстрации: мапить произвольную страницу на VGA — не то, что делают
+/// в проде, поэтому функция помечена `example`.
+pub fn create_example_mapping(
+    page: Page,
+    mapper: &mut OffsetPageTable,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+) {
+    let frame = PhysFrame::containing_address(PhysAddr::new(0xb8000));
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+
+    // SAFETY: фрейм 0xb8000 — это существующий VGA-буфер, отобразить его безопасно.
+    // В общем случае `map_to` небезопасна: можно создать алиас или занять уже
+    // используемый фрейм. Здесь это осознанная единичная демонстрация.
+    let map_to_result = unsafe { mapper.map_to(page, frame, flags, frame_allocator) };
+    map_to_result.expect("map_to failed").flush();
 }

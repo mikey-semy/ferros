@@ -15,8 +15,10 @@
 
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
+use ferros::mm::frame::BootInfoFrameAllocator;
 use ferros::{hlt_loop, mm, println, serial_println};
-use x86_64::{structures::paging::Translate, VirtAddr};
+use x86_64::structures::paging::{Page, Translate};
+use x86_64::VirtAddr;
 
 // `entry_point!` генерирует `_start` за нас: проверяет, что сигнатура `kernel_main`
 // совпадает с тем, что передаёт bootloader, и безопасно прокидывает `&BootInfo`.
@@ -37,8 +39,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
     // SAFETY: оффсет получен от bootloader (фича map_physical_memory) и корректен;
     // init вызывается ровно один раз.
-    let mapper = unsafe { mm::paging::init(phys_mem_offset) };
+    let mut mapper = unsafe { mm::paging::init(phys_mem_offset) };
 
+    // M3a: трансляция нескольких виртуальных адресов в физические.
     let addresses = [
         0xb8000,                          // VGA-буфер → ожидаем Some(физ. адрес)
         boot_info.physical_memory_offset, // база отображения физпамяти → Some
@@ -51,6 +54,27 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         // Диагностику шлём в serial — это наш отладочный канал (виден в логах/CI).
         serial_println!("  {virt:?} -> {phys:?}");
     }
+
+    // M3b: строим аллокатор физических фреймов и создаём НОВЫЙ маппинг.
+    // SAFETY: карта памяти от bootloader валидна; её Usable-регионы свободны.
+    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
+
+    // Берём заведомо свободную страницу (вне отображённых регионов) и отображаем её
+    // на физический фрейм VGA-буфера: теперь запись в эту страницу = запись на экран.
+    let page = Page::containing_address(VirtAddr::new(0x4444_4444_0000));
+    mm::paging::create_example_mapping(page, &mut mapper, &mut frame_allocator);
+
+    // Пишем "New!" через свежий маппинг. Литерал — четыре VGA-ячейки `[символ][атрибут]`
+    // в порядке little-endian: 4e='N', 65='e', 77='w', 21='!', каждая с атрибутом 0xf0.
+    let page_ptr: *mut u64 = page.start_address().as_mut_ptr();
+    // SAFETY: страница только что отображена на VGA-буфер с правом на запись;
+    // смещение 400 (×8 байт = 3200) попадает в пределах одной страницы 4 КиБ.
+    unsafe {
+        page_ptr
+            .offset(400)
+            .write_volatile(0xf0_21_f0_77_f0_65_f0_4e)
+    };
+    serial_println!("[mm] new mapping ok; wrote 'New!' to VGA via the fresh page");
 
     println!("ferros ready. Timer ticks below; type on the keyboard:");
 
