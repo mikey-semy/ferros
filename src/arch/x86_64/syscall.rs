@@ -32,6 +32,7 @@
 
 use crate::arch::x86_64::gdt;
 use core::sync::atomic::{AtomicU64, Ordering};
+use x86_64::instructions::interrupts;
 use x86_64::registers::model_specific::{Efer, EferFlags, LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
 use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, Page, Size4KiB};
@@ -163,24 +164,29 @@ core::arch::global_asm!(
     resume = sym KERNEL_RESUME_RSP,
 );
 
-// Пробник кольца 3 (M5a): крошечный позиционно-независимый код (только immediate'ы,
-// `syscall` и относительный `jmp`), который мы КОПИРУЕМ в пользовательскую страницу.
-// Делает PING (ядро записывает аргумент и user_rsp, `sysret` обратно), затем RETURN
-// (ядро раскручивается обратно в тест), затем — на всякий случай — вечный цикл.
+// Первая пользовательская программа (M5b): крошечный позиционно-независимый код (только
+// immediate'ы и `syscall`), который мы КОПИРУЕМ в пользовательскую страницу. Делает
+// настоящие Linux-вызовы: `write(1, msg, len)` (печатает строку из памяти пользователя),
+// затем `exit(0)` (ядро раскручивается обратно в вызвавший контекст). Хвостовой `jmp` —
+// страховка: `exit` не возвращается.
 core::arch::global_asm!(
-    ".global ferros_user_probe_start",
-    "ferros_user_probe_start:",
-    "    mov eax, {ping}",
-    "    mov edi, {magic}",
+    ".global ferros_user_hello_start",
+    "ferros_user_hello_start:",
+    "    mov eax, {sys_write}", // nr = write
+    "    mov edi, 1",           // fd = stdout
+    "    mov esi, {msg_va}",    // buf
+    "    mov edx, {msg_len}",   // count
     "    syscall",
-    "    mov eax, {ret}",
+    "    mov eax, {sys_exit}", // nr = exit
+    "    mov edi, 0",          // status = 0
     "    syscall",
     "2:  jmp 2b",
-    ".global ferros_user_probe_end",
-    "ferros_user_probe_end:",
-    ping = const crate::syscall::DEBUG_PING as i32,
-    magic = const crate::syscall::PROBE_MAGIC as i32,
-    ret = const crate::syscall::DEBUG_RETURN as i32,
+    ".global ferros_user_hello_end",
+    "ferros_user_hello_end:",
+    sys_write = const crate::syscall::abi::SYS_WRITE as i32,
+    sys_exit = const crate::syscall::abi::SYS_EXIT as i32,
+    msg_va = const USER_DATA_VA as i32,
+    msg_len = const HELLO_MSG.len() as i32,
 );
 
 extern "C" {
@@ -191,8 +197,8 @@ extern "C" {
     /// Восстанавливает контекст ядра, сохранённый [`ferros_enter_user`], и возвращается
     /// туда. Вызвавшему (диспетчеру) управление НЕ возвращает — отсюда тип `-> !`.
     fn ferros_resume_kernel() -> !;
-    fn ferros_user_probe_start();
-    fn ferros_user_probe_end();
+    fn ferros_user_hello_start();
+    fn ferros_user_hello_end();
 }
 
 /// Glue между голым трамплином и переносимым диспетчером: распаковывает [`SyscallRegs`],
@@ -251,51 +257,67 @@ pub fn init() {
     SYSCALL_KERNEL_RSP.store(top & !0xF, Ordering::SeqCst);
 }
 
-/// Виртуальный адрес страницы кода пользователя для пробника M5a (нижняя половина —
-/// пользовательская часть адресного пространства; в M5c у процессов будут свои таблицы).
+/// Виртуальный адрес страницы кода пользователя (нижняя половина — пользовательская часть
+/// адресного пространства; в M5c у процессов будут свои таблицы).
 pub const USER_CODE_VA: u64 = 0x4000_0000;
-/// Виртуальный адрес страницы стека пользователя для пробника M5a.
+/// Виртуальный адрес страницы стека пользователя.
 pub const USER_STACK_VA: u64 = 0x4010_0000;
+/// Виртуальный адрес страницы данных пользователя (туда кладём строку для `write`).
+pub const USER_DATA_VA: u64 = 0x4020_0000;
+/// Строка, которую первая пользовательская программа печатает через `write` (M5b).
+pub const HELLO_MSG: &[u8] = b"hello from ring 3\n";
 
-/// M5a-бутстрап: маппит пользовательские страницы кода/стека, копирует туда пробник и
-/// прыгает в кольцо 3. Возвращает использованную вершину пользовательского стека (тест
-/// сверяет с ней зафиксированный диспетчером `user_rsp`).
+/// Запускает первую пользовательскую программу (M5b): маппит страницы кода/стека/данных,
+/// копирует туда код и строку, прыгает в кольцо 3. Программа печатает [`HELLO_MSG`] через
+/// настоящий `write` и завершается `exit` — тогда управление возвращается сюда. Возвращает
+/// вершину пользовательского стека (тест сверяет с ней зафиксированный `user_rsp`).
 ///
-/// Маппинг идёт в активную (ядровую) таблицу страниц: в M5a отдельного адресного
-/// пространства ещё нет, а нижняя половина у ядра свободна.
+/// Маппинг идёт в активную (ядровую) таблицу: отдельного адресного пространства ещё нет
+/// (M5c), а нижняя половина у ядра свободна. Состояние прерываний (IF) сохраняется и
+/// восстанавливается: в кольцо 3 входим с IF=0 и обратно приходим с IF=0.
 ///
 /// # Safety
-/// Вызывать один раз, с корректными `mapper`/`frame_allocator` для активной таблицы и
-/// поднятой кучей. `USER_CODE_VA`/`USER_STACK_VA` должны быть не отображены (иначе
+/// Вызывать с корректными `mapper`/`frame_allocator` для активной таблицы и поднятой
+/// кучей. `USER_CODE_VA`/`USER_STACK_VA`/`USER_DATA_VA` должны быть не отображены (иначе
 /// `map_to` запаникует).
-pub unsafe fn run_ring3_probe(
+pub unsafe fn run_user_hello(
     mapper: &mut OffsetPageTable,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) -> u64 {
-    let code_page = Page::containing_address(VirtAddr::new(USER_CODE_VA));
-    let stack_page = Page::containing_address(VirtAddr::new(USER_STACK_VA));
-    crate::mm::paging::map_user_page(code_page, mapper, frame_allocator);
-    crate::mm::paging::map_user_page(stack_page, mapper, frame_allocator);
+    for va in [USER_CODE_VA, USER_STACK_VA, USER_DATA_VA] {
+        let page = Page::containing_address(VirtAddr::new(va));
+        crate::mm::paging::map_user_page(page, mapper, frame_allocator);
+    }
 
-    // Копируем пробник из .text ядра в пользовательскую страницу. Код позиционно-
-    // независим (immediate'ы + syscall + относительный jmp), поэтому копирование безопасно.
-    let start = ferros_user_probe_start as *const () as usize;
-    let end = ferros_user_probe_end as *const () as usize;
+    // Копируем код программы из .text ядра в пользовательскую страницу. Он позиционно-
+    // независим (immediate'ы + syscall), поэтому копирование безопасно.
+    let start = ferros_user_hello_start as *const () as usize;
+    let end = ferros_user_hello_end as *const () as usize;
     let len = end - start;
-    // Пробник копируется в ОДНУ страницу — он обязан в неё влезать. Иначе copy ушёл бы за
-    // её пределы (в следующую, неотображённую страницу → page fault).
-    assert!(len <= 4096, "ring-3 probe does not fit in one page");
-    // SAFETY: src — диапазон [start,end) в .text ядра; dst — только что отображённая
-    // пользовательская страница (присутствует, доступна на запись из кольца 0); длина
-    // пробника заведомо меньше страницы.
+    // Код и строка копируются каждый в ОДНУ страницу — обязаны влезать, иначе copy ушёл
+    // бы за её пределы (в следующую, неотображённую страницу → page fault).
+    assert!(len <= 4096, "ring-3 program does not fit in one page");
+    assert!(
+        HELLO_MSG.len() <= 4096,
+        "hello message does not fit in one page"
+    );
+    // SAFETY: src — диапазоны в ядре (.text и .rodata); dst — только что отображённые
+    // пользовательские страницы (присутствуют, доступны на запись из кольца 0); длины
+    // проверены выше.
     unsafe {
         core::ptr::copy_nonoverlapping(start as *const u8, USER_CODE_VA as *mut u8, len);
+        core::ptr::copy_nonoverlapping(
+            HELLO_MSG.as_ptr(),
+            USER_DATA_VA as *mut u8,
+            HELLO_MSG.len(),
+        );
     }
 
     let user_stack_top = USER_STACK_VA + 4096;
     let sel = gdt::selectors();
+    let was_enabled = interrupts::are_enabled();
     // SAFETY: страницы отображены user-accessible, селекторы кольца 3 валидны (RPL=3),
-    // стек выровнен. Управление вернётся, когда пробник сделает DEBUG_RETURN.
+    // стек выровнен. Управление вернётся, когда программа сделает `exit`.
     unsafe {
         ferros_enter_user(
             USER_CODE_VA,
@@ -303,6 +325,10 @@ pub unsafe fn run_ring3_probe(
             sel.user_code.0 as u64,
             sel.user_data.0 as u64,
         );
+    }
+    // Вернулись из кольца 3 с IF=0 — восстановим исходное состояние прерываний.
+    if was_enabled {
+        interrupts::enable();
     }
     user_stack_top
 }

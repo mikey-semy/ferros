@@ -114,15 +114,24 @@ impl Writer {
         }
     }
 
-    /// Печатает строку. Непечатаемые/не-ASCII байты заменяет на заглушку `■`,
-    /// потому что VGA-шрифт знает только однобайтовые коды.
-    fn write_string(&mut self, s: &str) {
-        for byte in s.bytes() {
+    /// Печатает байты, заменяя непечатаемые/не-ASCII на заглушку `■` (VGA-шрифт знает
+    /// только однобайтовые коды). Общая «рабочая лошадка» для [`write_string`] и
+    /// [`write_bytes`].
+    ///
+    /// [`write_string`]: Self::write_string
+    /// [`write_bytes`]: super::write_bytes
+    fn write_filtered(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
             match byte {
                 0x20..=0x7e | b'\n' => self.write_byte(byte),
                 _ => self.write_byte(0xfe),
             }
         }
+    }
+
+    /// Печатает строку (через [`write_filtered`](Self::write_filtered)).
+    fn write_string(&mut self, s: &str) {
+        self.write_filtered(s.as_bytes());
     }
 
     /// Перенос строки: сдвигаем весь экран на строку вверх, нижнюю очищаем.
@@ -175,6 +184,15 @@ pub fn _print(args: fmt::Arguments) {
     // мог бы попытаться взять тот же замок и устроить дедлок.
     x86_64::instructions::interrupts::without_interrupts(|| {
         WRITER.lock().write_fmt(args).unwrap();
+    });
+}
+
+/// Пишет сырые байты на экран (для системного вызова `write` в stdout, M5b). Непечатаемые
+/// байты заменяются на заглушку `■` (см. [`Writer::write_filtered`]). Замок держим под
+/// выключенными прерываниями (то же правило против дедлока, что и в [`_print`]).
+pub fn write_bytes(bytes: &[u8]) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        WRITER.lock().write_filtered(bytes);
     });
 }
 

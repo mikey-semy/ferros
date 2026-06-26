@@ -7,65 +7,91 @@
 //! отсюда. Это переносимая (арх-независимая) «телефонистка»: по номеру вызова направляет
 //! в нужный обработчик и возвращает результат.
 //!
-//! # Linux-форма с первого дня (D8)
+//! # Linux-форма (D8)
 //!
-//! Номера и семантика вызовов копируют **Linux x86-64** (см. `docs/DECISIONS.md` D8): тот
-//! же слой потом понесёт и source-level POSIX (relibc, M9), и ABI-совместимость, поэтому
-//! «правильные» номера сейчас экономят переписывание позже. Аргументы приходят уже
-//! разложенными по Linux-ABI (`rdi, rsi, rdx, r10, r8, r9`); результат — `isize`, где
-//! отрицательное значение есть `-errno` (диапазон ошибок `[-4095, -1]`).
+//! Номера и семантика — из таблицы **Linux x86-64** ([`abi`]); тот же слой потом понесёт
+//! и source-level POSIX (relibc, M9), и ABI-совместимость. Аргументы приходят уже
+//! разложенными по Linux-ABI (`rdi, rsi, rdx, r10, r8, r9`); результат — `i64`, где
+//! отрицательное значение есть `-errno`.
 //!
-//! # M5a — заглушка
+//! # Опасное — за швами
 //!
-//! Пока (M5a) тут только каркас: настоящая таблица номеров Linux и первые реальные вызовы
-//! (`write`, `exit`) приедут в M5b вместе с `abi.rs` и безопасным доступом к памяти
-//! пользователя. Сейчас распознаём пару **отладочных** номеров (заведомо НЕ из таблицы
-//! Linux), которыми тест M5a доказывает работу перехода кольцо 3 ⇄ ядро.
+//! Доступ к памяти пользователя идёт только через [`uaccess`] (там собран весь сырой
+//! `unsafe`, D9); вывод — через драйверы. Здесь — чистая безопасная логика.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+pub mod abi;
+pub mod uaccess;
+
+use crate::drivers::{serial, vga};
+use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 /// Исход системного вызова — что трамплину делать после [`dispatch`].
 pub enum SyscallOutcome {
     /// Вернуть значение в `rax` и `sysret` обратно в кольцо 3 (обычный путь).
     Return(i64),
     /// Не возвращаться в пользователя, а раскрутиться обратно в сохранённый контекст ядра
-    /// (M5a-бутстрап; в M5b/c так будет завершаться/блокироваться процесс).
+    /// (так завершается процесс по `exit`; полноценное планирование/реапинг — в M5c).
     LeaveUser,
 }
 
-/// `-ENOSYS` (38): «вызов не реализован» — Linux-ответ на неизвестный номер.
-const ENOSYS: i64 = 38;
+// --- Наблюдаемость для тестов M5b (последний обработанный write/exit) ---
 
-// --- M5a отладочные номера и наблюдаемость (заменяются Linux-таблицей в M5b) ---
-
-/// Отладочный «пинг»: ядро фиксирует аргумент и `user_rsp`, затем `sysret` обратно.
-/// Значение нарочно вне таблицы Linux x86-64 — это не настоящий syscall.
-pub const DEBUG_PING: u64 = 0xF000_0001;
-/// Отладочный «возврат»: ядро раскручивается обратно в тест ([`SyscallOutcome::LeaveUser`]).
-pub const DEBUG_RETURN: u64 = 0xF000_0002;
-/// Магическое значение, которое пробник кольца 3 передаёт в `DEBUG_PING` (для сверки).
-pub const PROBE_MAGIC: u64 = 0xCAFE_F00D;
-
-/// Последний аргумент, увиденный обработчиком `DEBUG_PING` (наблюдаемость для теста M5a).
-pub static LAST_DEBUG_ARG: AtomicU64 = AtomicU64::new(0);
-/// `user_rsp` на момент последнего `DEBUG_PING` (тест сверяет с вершиной user-стека).
-pub static LAST_DEBUG_USER_RSP: AtomicU64 = AtomicU64::new(0);
-/// Сколько раз отработал `DEBUG_PING` (тест проверяет, что переход состоялся).
-pub static DEBUG_PING_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Файловый дескриптор последнего `write` (тест сверяет, что это был stdout=1).
+pub static LAST_WRITE_FD: AtomicU64 = AtomicU64::new(0);
+/// Длина последнего `write`.
+pub static LAST_WRITE_LEN: AtomicU64 = AtomicU64::new(0);
+/// Сумма байт последнего `write` (дешёвая проверка, что из памяти пользователя прочиталось
+/// именно то, что нужно).
+pub static LAST_WRITE_SUM: AtomicU64 = AtomicU64::new(0);
+/// `user_rsp` на момент последнего `write` (тест сверяет с вершиной user-стека — значит
+/// код реально шёл в кольце 3 на своём стеке).
+pub static LAST_WRITE_USER_RSP: AtomicU64 = AtomicU64::new(0);
+/// Код последнего `exit`/`exit_group`.
+pub static LAST_EXIT_CODE: AtomicI64 = AtomicI64::new(-1);
+/// Сколько раз вызывался `exit`/`exit_group` (тест проверяет, что завершение случилось).
+pub static EXIT_CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// Диспетчер системных вызовов: по номеру `nr` (Linux x86-64) направляет в обработчик.
 /// `args` уже разложены по Linux-ABI: `[rdi, rsi, rdx, r10, r8, r9]`. `user_rsp` —
 /// указатель стека пользователя на момент вызова.
 pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> SyscallOutcome {
     match nr {
-        DEBUG_PING => {
-            LAST_DEBUG_ARG.store(args[0], Ordering::SeqCst);
-            LAST_DEBUG_USER_RSP.store(user_rsp, Ordering::SeqCst);
-            DEBUG_PING_COUNT.fetch_add(1, Ordering::SeqCst);
-            SyscallOutcome::Return(0)
+        abi::SYS_WRITE => SyscallOutcome::Return(sys_write(args[0], args[1], args[2], user_rsp)),
+        abi::SYS_EXIT | abi::SYS_EXIT_GROUP => {
+            LAST_EXIT_CODE.store(args[0] as i64, Ordering::SeqCst);
+            EXIT_CALLS.fetch_add(1, Ordering::SeqCst);
+            SyscallOutcome::LeaveUser
         }
-        DEBUG_RETURN => SyscallOutcome::LeaveUser,
         // Неизвестный номер — как в Linux: -ENOSYS.
-        _ => SyscallOutcome::Return(-ENOSYS),
+        _ => SyscallOutcome::Return(-abi::ENOSYS),
     }
+}
+
+/// `write(fd, buf, count)`: пишет `count` байт из пользовательского буфера `buf` в `fd`.
+/// Поддержаны `fd=1` (stdout → VGA) и `fd=2` (stderr → serial); прочее → `-EBADF`.
+/// Возвращает число записанных байт или `-errno`.
+fn sys_write(fd: u64, buf: u64, count: u64, user_rsp: u64) -> i64 {
+    // Куда выводим — решаем по fd ДО чтения памяти пользователя.
+    let sink: fn(&[u8]) = match fd {
+        1 => vga::write_bytes,
+        2 => serial::write_bytes,
+        _ => return -abi::EBADF,
+    };
+
+    match uaccess::with_user_bytes(buf, count, |bytes| {
+        sink(bytes);
+        record_write(fd, bytes, user_rsp);
+        bytes.len() as i64
+    }) {
+        Ok(written) => written,
+        Err(errno) => -errno,
+    }
+}
+
+/// Фиксирует параметры `write` для тестовой наблюдаемости (см. статики выше).
+fn record_write(fd: u64, bytes: &[u8], user_rsp: u64) {
+    LAST_WRITE_FD.store(fd, Ordering::SeqCst);
+    LAST_WRITE_LEN.store(bytes.len() as u64, Ordering::SeqCst);
+    LAST_WRITE_SUM.store(bytes.iter().map(|&b| b as u64).sum(), Ordering::SeqCst);
+    LAST_WRITE_USER_RSP.store(user_rsp, Ordering::SeqCst);
 }
