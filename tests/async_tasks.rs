@@ -16,11 +16,13 @@ use core::panic::PanicInfo;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::task::{Context, Poll};
+use ferros::drivers::keyboard;
 use ferros::mm::frame::BootInfoFrameAllocator;
 use ferros::mm::{heap, paging};
 use ferros::sched::executor::Executor;
 use ferros::sched::simple_executor::SimpleExecutor;
 use ferros::sched::Task;
+use futures_util::stream::StreamExt;
 use x86_64::VirtAddr;
 
 entry_point!(main);
@@ -99,4 +101,37 @@ fn executor_runs_yielding_task() {
     executor.spawn(Task::new(yielding_task()));
     executor.run_ready_tasks();
     assert!(YIELDED_DONE.load(Ordering::SeqCst));
+}
+
+/// Куда задача-читатель кладёт полученный скан-код (`0xffff_ffff` = «ещё не пришёл»).
+static GOT_SCANCODE: AtomicU32 = AtomicU32::new(0xffff_ffff);
+
+async fn read_one_scancode() {
+    let mut scancodes = keyboard::ScancodeStream::new();
+    if let Some(scancode) = scancodes.next().await {
+        GOT_SCANCODE.store(scancode as u32, Ordering::SeqCst);
+    }
+}
+
+/// Полный путь async-клавиатуры (M4c): задача ждёт на пустом потоке (Pending +
+/// регистрирует waker); затем `add_scancode` — как из прерывания — кладёт байт и
+/// будит задачу; следующий проход доводит её до полученного скан-кода.
+#[test_case]
+fn keyboard_stream_wakes_on_scancode() {
+    keyboard::init();
+    GOT_SCANCODE.store(0xffff_ffff, Ordering::SeqCst);
+
+    let mut executor = Executor::new();
+    executor.spawn(Task::new(read_one_scancode()));
+
+    // Первый проход: очередь пуста → задача уходит в Pending и регистрирует waker.
+    executor.run_ready_tasks();
+    assert_eq!(GOT_SCANCODE.load(Ordering::SeqCst), 0xffff_ffff);
+
+    // «Прерывание»: кладём скан-код и будим задачу (waker возвращает её в очередь).
+    keyboard::add_scancode(0x1E); // 'a' в scancode set 1
+
+    // Второй проход: задача просыпается, читает байт и записывает его.
+    executor.run_ready_tasks();
+    assert_eq!(GOT_SCANCODE.load(Ordering::SeqCst), 0x1E);
 }

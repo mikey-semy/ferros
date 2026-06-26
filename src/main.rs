@@ -21,6 +21,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
+use ferros::drivers::keyboard;
 use ferros::mm::frame::BootInfoFrameAllocator;
 use ferros::sched::executor::Executor;
 use ferros::sched::Task;
@@ -87,6 +88,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // M3c: инициализируем кучу — после этого доступна динамическая память.
     mm::heap::init_heap(&mut mapper, &mut frame_allocator).expect("heap init failed");
 
+    // M4c: очередь скан-кодов клавиатуры (после кучи — она аллоцирует буфер).
+    keyboard::init();
+
     // Динамические аллокации поверх кучи: Box (одно значение) и Vec (растущий массив).
     let boxed = Box::new(42);
     let mut numbers = Vec::new();
@@ -114,6 +118,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // async-задачи, а когда делать нечего — спит на `hlt` (CPU не жжёт впустую).
     let mut executor = Executor::new();
     executor.spawn(Task::new(example_task()));
+    executor.spawn(Task::new(keyboard::print_keypresses()));
     executor.run()
 }
 
