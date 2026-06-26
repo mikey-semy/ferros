@@ -97,3 +97,34 @@ pub fn create_example_mapping(
     let map_to_result = unsafe { mapper.map_to(page, frame, flags, frame_allocator) };
     map_to_result.expect("map_to failed").flush();
 }
+
+/// Отображает `page` на свежий физический фрейм как **пользовательскую** (`USER_ACCESSIBLE`)
+/// страницу, доступную на чтение/запись (M5). Флаг `USER_ACCESSIBLE` — это и есть та
+/// граница, что отделяет память ядра от памяти кольца 3: без него обращение из кольца 3
+/// вызвало бы page fault. Используется для кода/стека пользователя.
+///
+/// Пока без `NO_EXECUTE` и без W^X (страница и пишется, и исполняется) — это в HARDENING.
+///
+/// # Panics
+/// Если фреймов нет или `page` уже отображена (`map_to` вернёт ошибку).
+pub fn map_user_page(
+    page: Page,
+    mapper: &mut OffsetPageTable,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+) {
+    let frame = frame_allocator
+        .allocate_frame()
+        .expect("out of frames for user page");
+    let flags =
+        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+
+    // Промежуточные таблицы (L3/L2/L1) ТОЖЕ должны быть USER_ACCESSIBLE, иначе CPU
+    // посчитает весь перевод супервизорным и обращение из кольца 3 упадёт в page fault.
+    // `map_to` по умолчанию ставит на родительские записи `PRESENT|WRITABLE|USER_ACCESSIBLE`,
+    // так что нам достаточно указать флаг на листовой записи.
+    //
+    // SAFETY: `frame` только что выдан аллокатором (никем не используется), поэтому алиас
+    // не создаётся; `page` выбирается из свободной нижней половины адресного пространства.
+    let result = unsafe { mapper.map_to(page, frame, flags, frame_allocator) };
+    result.expect("map_to (user) failed").flush();
+}

@@ -7,15 +7,19 @@
 pub mod context;
 pub mod gdt;
 pub mod interrupts;
+pub mod syscall;
 
 /// Инициализация процессора под x86_64.
 ///
-/// Порядок критичен: сначала GDT+TSS (даёт IST-стек для double fault), затем IDT
-/// (ссылается на этот стек), затем перемап PIC и `sti`. После `sti` ядро начинает
-/// реагировать на аппаратные прерывания (таймер, клавиатуру).
+/// Порядок критичен: сначала GDT+TSS (даёт IST-стек для double fault и селекторы колец),
+/// затем IDT (ссылается на IST-стек), затем настройка `syscall` (берёт селекторы из GDT),
+/// затем перемап PIC и `sti`. После `sti` ядро реагирует на аппаратные прерывания.
 pub fn init() {
     gdt::init();
     interrupts::init_idt();
+    // M5: настройка инструкции `syscall` (MSR STAR/LSTAR/SFMASK, EFER.SCE). После GDT —
+    // нужны её селекторы колец 0/3.
+    syscall::init();
     // SAFETY: PIC перемаплен на свободные векторы 32..47 (см. interrupts.rs);
     // исключения CPU (0..31) не затронуты.
     unsafe { interrupts::PICS.lock().initialize() };

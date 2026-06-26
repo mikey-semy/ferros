@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use pic8259::ChainedPics;
 use spin::{LazyLock, Mutex};
 use x86_64::instructions::port::Port;
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
+use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 /// Вектор, с которого начинается первый (master) PIC.
 pub const PIC_1_OFFSET: u8 = 32;
@@ -50,6 +50,12 @@ static IDT: LazyLock<InterruptDescriptorTable> = LazyLock::new(|| {
             .set_handler_fn(double_fault_handler)
             .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
     }
+    // Исключения, которые становятся реальными с приходом кольца 3 (M5): обращение к
+    // неотображённой/чужой памяти и нарушение защиты. Без обработчиков они привели бы к
+    // тройному сбросу — а так мы увидим диагностику.
+    idt.page_fault.set_handler_fn(page_fault_handler);
+    idt.general_protection_fault
+        .set_handler_fn(general_protection_fault_handler);
     idt[InterruptIndex::Timer.as_u8()].set_handler_fn(timer_interrupt_handler);
     idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
     idt
@@ -72,6 +78,30 @@ extern "x86-interrupt" fn double_fault_handler(
     _error_code: u64,
 ) -> ! {
     panic!("EXCEPTION: DOUBLE FAULT\n{stack_frame:#?}");
+}
+
+/// Обработчик page fault. `CR2` хранит адрес, к которому шло обращение; код ошибки
+/// говорит, было ли это чтение/запись, из пользователя ли и т.п. В M5a (процессов ещё
+/// нет) это всегда баг ядра — паникуем. В M5c сбой пользователя будет завершать процесс,
+/// а не ядро.
+extern "x86-interrupt" fn page_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: PageFaultErrorCode,
+) {
+    let addr = x86_64::registers::control::Cr2::read_raw();
+    panic!(
+        "EXCEPTION: PAGE FAULT\n  accessed: {addr:#x}\n  error: {error_code:?}\n{stack_frame:#?}"
+    );
+}
+
+/// Обработчик general protection fault: нарушение защиты (например, недопустимый
+/// селектор или привилегированная инструкция из кольца 3). `error_code` — селектор-
+/// виновник (или 0). Паникуем с диагностикой.
+extern "x86-interrupt" fn general_protection_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    panic!("EXCEPTION: GENERAL PROTECTION FAULT (code {error_code:#x})\n{stack_frame:#?}");
 }
 
 /// Счётчик тиков таймера (PIT, ~18.2 Гц). Растёт на каждом прерывании; основа отсчёта
