@@ -101,9 +101,11 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
 
-    // Вытеснение: переключиться на следующий поток (если включено). Мы с IF=0 — это и
-    // нужно switch_context; восстановление IF сделает `iretq` при возврате в поток.
-    crate::sched::thread::on_timer_tick();
+    // Вытеснение: переключиться на следующий поток (если включено). Восстановление IF
+    // сделает `iretq` при возврате в поток.
+    // SAFETY: мы в обработчике прерывания (вход через interrupt gate → IF=0), как и
+    // требует on_timer_tick для безопасного переключения контекста.
+    unsafe { crate::sched::thread::on_timer_tick() };
 }
 
 /// Обработчик клавиатуры. Читает скан-код из порта `0x60` и отдаёт его драйверу
