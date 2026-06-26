@@ -13,6 +13,12 @@
 #![test_runner(ferros::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+// Крейт `alloc` (Box/Vec/String) — работает после инициализации кучи (M3c).
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use ferros::mm::frame::BootInfoFrameAllocator;
@@ -75,6 +81,26 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
             .write_volatile(0xf0_21_f0_77_f0_65_f0_4e)
     };
     serial_println!("[mm] new mapping ok; wrote 'New!' to VGA via the fresh page");
+
+    // M3c: инициализируем кучу — после этого доступна динамическая память.
+    mm::heap::init_heap(&mut mapper, &mut frame_allocator).expect("heap init failed");
+
+    // Динамические аллокации поверх кучи: Box (одно значение) и Vec (растущий массив).
+    let boxed = Box::new(42);
+    let mut numbers = Vec::new();
+    for i in 1..=10 {
+        numbers.push(i);
+    }
+    serial_println!(
+        "[mm] heap up: Box={} at {:p}, Vec sum(1..=10)={}",
+        boxed,
+        boxed,
+        numbers.iter().sum::<i32>()
+    );
+
+    // String живёт на куче — печатаем на VGA, чтобы куча была видна и глазами.
+    let greeting = String::from("heap online: Box + Vec + String work!");
+    println!("{greeting}");
 
     println!("ferros ready. Timer ticks below; type on the keyboard:");
 
