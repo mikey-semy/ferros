@@ -120,6 +120,17 @@ pub fn _print(args: fmt::Arguments) {
     });
 }
 
+/// Пишет сырые байты в COM1 (для системного вызова `write` в stderr, M5b). Замок держим
+/// под выключенными прерываниями (то же правило против дедлока, что и в [`_print`]).
+pub fn write_bytes(bytes: &[u8]) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut port = SERIAL1.lock();
+        for &byte in bytes {
+            port.send(byte);
+        }
+    });
+}
+
 /// Печать в serial без перевода строки.
 #[macro_export]
 macro_rules! serial_print {

@@ -178,6 +178,21 @@ pub fn _print(args: fmt::Arguments) {
     });
 }
 
+/// Пишет сырые байты на экран (для системного вызова `write` в stdout, M5b). Непечатаемые
+/// байты заменяются на заглушку `■`, как и в [`Writer::write_string`]. Замок держим под
+/// выключенными прерываниями (то же правило против дедлока, что и в [`_print`]).
+pub fn write_bytes(bytes: &[u8]) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut writer = WRITER.lock();
+        for &byte in bytes {
+            match byte {
+                0x20..=0x7e | b'\n' => writer.write_byte(byte),
+                _ => writer.write_byte(0xfe),
+            }
+        }
+    });
+}
+
 /// Печать без перевода строки: `print!("x = {}", x)`.
 #[macro_export]
 macro_rules! print {

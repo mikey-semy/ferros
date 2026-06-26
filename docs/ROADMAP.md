@@ -2,8 +2,9 @@
 
 Each milestone is a complete, observable result ("it now does X") and ends with a
 merged PR. We detail a milestone only when we reach it. Current status: **M5 in
-progress** (M5a — ring 3 + the `syscall` round-trip — done; M0–M4 merged). **Next:
-M5b** (Linux-shaped syscall table + first real syscalls `write`/`exit`).
+progress** (M5a — ring 3 + `syscall` round-trip; M5b — Linux-shaped syscall table +
+`write`/`exit` — done; M0–M4 merged). **Next: M5c** (per-process address spaces +
+ELF loading + scheduler integration).
 
 > **North star (D8):** run the existing **Linux** software ecosystem rather than write a
 > native app ecosystem from scratch. Long-term aim is **ABI-level** compatibility
