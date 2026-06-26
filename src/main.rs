@@ -114,14 +114,21 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     #[cfg(test)]
     test_main();
 
-    // M5b: первая пользовательская программа. Прыгаем в кольцо 3, программа печатает
-    // строку настоящим `write(1, …)` и завершается `exit` — видно прямо на экране. После
-    // её завершения управление возвращается в ядро, и мы печатаем код выхода.
+    // M5c1: загружаем и запускаем НАСТОЯЩУЮ пользовательскую программу — отдельно собранный
+    // ELF (крейт `user/hello`, встроен в образ через build.rs). Ядро разбирает ELF, кладёт
+    // сегменты в память кольца 3 и прыгает в точку входа; программа печатает строку
+    // настоящим `write` и завершается `exit`. Видно прямо на экране.
     // SAFETY: вызывается один раз, mapper/frame_allocator — для активной таблицы, куча
-    // поднята; пользовательские адреса свободны.
-    unsafe { ferros::arch::x86_64::syscall::run_user_hello(&mut mapper, &mut frame_allocator) };
+    // поднята; адреса сегментов/стека свободны.
+    unsafe {
+        ferros::arch::x86_64::syscall::run_user_elf(
+            ferros::syscall::elf::HELLO_ELF,
+            &mut mapper,
+            &mut frame_allocator,
+        )
+    };
     println!(
-        "[user] ring-3 program exited with code {}",
+        "[user] ELF program exited with code {}",
         ferros::syscall::LAST_EXIT_CODE.load(core::sync::atomic::Ordering::SeqCst)
     );
 

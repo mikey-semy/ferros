@@ -91,6 +91,19 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   fixup table (extable): the `#PF` handler recognises a fault inside a uaccess region and
   returns `-EFAULT` instead of dying. Also `write` content capture (`LAST_WRITE_*`) is
   test observability in the production path — drop it once there's a better test hook.
+- **No per-process address space yet (M5c1).** A loaded ELF runs in the *shared* kernel
+  address space (its pages live in the kernel's tables, user-gated by the leaf PTE). There's
+  no inter-process isolation and no user/user separation. Deferred per **D10** toward the
+  higher-half / bootloader-0.11 move (M11); the ELF loader already takes a mapper, so
+  retargeting it to a per-process `AddressSpace` is a small change (M5c2).
+- **No W^X / NX on loaded ELF segments (M5c1).** `mm::map_user_page` maps every user page
+  `PRESENT|WRITABLE|USER_ACCESSIBLE`, so even an ELF's `.text` is writable and its `.data`
+  is executable. The loader ignores `p_flags`. Honor per-segment R/W/X (and set `NO_EXECUTE`)
+  once the paging supports it.
+- **ELF loader trusts a well-formed, fixed-address `ET_EXEC` (M5c1).** Parsing is bounds-
+  checked, but the loader only handles static `ET_EXEC` with absolute vaddrs — no PIE/ASLR,
+  no relocations, no dynamic linking, no segment-overlap/`p_align` validation beyond
+  page-dedup. Fine for our own embedded binary; real/untrusted binaries need a fuller loader.
 
 ## Cross-cutting (whole kernel)
 
