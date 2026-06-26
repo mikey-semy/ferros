@@ -181,7 +181,7 @@ pub fn _print(args: fmt::Arguments) {
 /// Печать без перевода строки: `print!("x = {}", x)`.
 #[macro_export]
 macro_rules! print {
-    ($($arg:tt)*) => ($crate::vga_buffer::_print(format_args!($($arg)*)));
+    ($($arg:tt)*) => ($crate::drivers::vga::_print(format_args!($($arg)*)));
 }
 
 /// Печать с переводом строки: `println!("привет")`.

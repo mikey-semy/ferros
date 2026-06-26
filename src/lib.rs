@@ -19,23 +19,21 @@
 #![test_runner(crate::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
-pub mod gdt;
-pub mod interrupts;
-pub mod serial;
-pub mod vga_buffer;
+pub mod arch;
+pub mod drivers;
+pub mod fs;
+pub mod mm;
+pub mod net;
+pub mod sched;
+pub mod syscall;
+pub mod util;
 
 use core::panic::PanicInfo;
 
-/// Инициализация ядра: GDT+TSS, затем IDT (обработчики исключений/прерываний).
-/// Порядок важен: IDT ссылается на IST-стек из TSS, поэтому GDT — первым.
-/// Вызывается из `_start` до основной работы.
+/// Инициализация ядра: арх-зависимую настройку процессора (GDT+TSS, IDT, PIC,
+/// включение прерываний) делегируем в [`arch`]. Вызывается из `_start` до работы.
 pub fn init() {
-    gdt::init();
-    interrupts::init_idt();
-    // SAFETY: PIC перемаплен на безопасные векторы (32..47), см. interrupts.rs.
-    unsafe { interrupts::PICS.lock().initialize() };
-    // `sti` — с этого момента ядро реагирует на таймер и клавиатуру.
-    x86_64::instructions::interrupts::enable();
+    arch::init();
 }
 
 /// Idle-цикл: останавливаем CPU до прерывания.
