@@ -42,6 +42,21 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
 - **Single global spinlock on the heap** — a contention point once we have SMP (no SMP
   yet, so moot for now).
 
+## M4 — multitasking
+
+- **No thread teardown.** Kernel threads (M4d/M4e) are never removed from the scheduler
+  or have their stacks freed — a finished worker just loops yielding forever. Fine for
+  bring-up (the demo/test threads run for the lifetime of the kernel); real thread exit
+  + stack reclamation comes with a proper process model (M5+).
+- **Fixed round-robin, no time accounting.** The scheduler is plain round-robin with one
+  timer tick per quantum (~55 ms at the PIT's 18.2 Hz) and no priorities, no per-thread
+  CPU accounting, no sleep/wait queues. Good enough to prove preemption; a real scheduler
+  (priorities, fairness, a higher-resolution timer than the PIT) is a later pass.
+- **Preemption ignores lock holders.** A thread preempted while holding a `spin::Mutex`
+  keeps the lock held until it's rescheduled; another thread then spin-waits (and is
+  itself preempted, so it resolves on single-CPU, but it's wasteful). Needs a real
+  blocking primitive once we care about throughput / SMP.
+
 ## Cross-cutting (whole kernel)
 
 - **No real-hardware validation** — QEMU only until M11 (UEFI + real drivers).

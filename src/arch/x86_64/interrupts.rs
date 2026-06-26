@@ -9,6 +9,7 @@
 //!   PIC перемаплен на векторы 32..47, чтобы не пересекаться с исключениями CPU.
 
 use super::gdt;
+use core::sync::atomic::{AtomicU64, Ordering};
 use pic8259::ChainedPics;
 use spin::{LazyLock, Mutex};
 use x86_64::instructions::port::Port;
@@ -73,14 +74,36 @@ extern "x86-interrupt" fn double_fault_handler(
     panic!("EXCEPTION: DOUBLE FAULT\n{stack_frame:#?}");
 }
 
-/// Обработчик таймера (PIT, ~18 Гц). Печатает точку и сигналит PIC об окончании.
+/// Счётчик тиков таймера (PIT, ~18.2 Гц). Растёт на каждом прерывании; основа отсчёта
+/// времени и будущих «усыпить на N тиков».
+static TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// Сколько тиков таймера прошло с загрузки.
+pub fn ticks() -> u64 {
+    TICKS.load(Ordering::Relaxed)
+}
+
+/// Обработчик таймера (PIT, ~18.2 Гц). Считает тик, сигналит PIC об окончании и
+/// **вытесняет** текущий поток, если включено вытеснение (M4e).
+///
+/// Порядок важен: EOI шлём ДО переключения. Тогда тик «закрыт» в той же активации
+/// обработчика, что его получила, и каждое прерывание ровно один раз парно EOI. После
+/// EOI мы всё ещё с IF=0 (вход через interrupt gate), так что новый тик не вложится,
+/// пока [`on_timer_tick`] переключает контекст.
+///
+/// [`on_timer_tick`]: crate::sched::thread::on_timer_tick
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    crate::print!(".");
+    TICKS.fetch_add(1, Ordering::Relaxed);
+
     // SAFETY: вектор корректен; без EOI следующего тика не будет.
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
+
+    // Вытеснение: переключиться на следующий поток (если включено). Мы с IF=0 — это и
+    // нужно switch_context; восстановление IF сделает `iretq` при возврате в поток.
+    crate::sched::thread::on_timer_tick();
 }
 
 /// Обработчик клавиатуры. Читает скан-код из порта `0x60` и отдаёт его драйверу
