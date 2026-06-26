@@ -3,6 +3,10 @@
 Each milestone is a complete, observable result ("it now does X") and ends with a
 merged PR. We detail a milestone only when we reach it. Current status: **M0**.
 
+> This is **depth** (the path forward). For **breadth** — alternatives at each layer
+> (firmware, bootloader, runner, architecture, display) and where we could branch out
+> — see [LANDSCAPE.md](LANDSCAPE.md).
+
 ## Tier A — "It's alive" (bootable kernel)
 
 - **M0 — Environment + first boot.** Toolchain (nightly), QEMU, custom target,
