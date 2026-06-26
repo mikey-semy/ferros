@@ -15,5 +15,17 @@ bootloader = "0.9.23"
 
 # Спин-блокировка для глобальных Writer'ов (VGA и serial): на голом железе нет
 # ОС, которая усыпит поток, поэтому замок «крутится» в цикле. `Mutex::new` — const.
-# Также используем `spin::Lazy` для ленивой инициализации serial-порта.
+# Также используем `spin::LazyLock` для ленивой инициализации serial-порта.
 spin = "0.12"
+
+[package.metadata.bootimage]
+# Тестовый режим QEMU: устройство isa-debug-exit (ядро само завершит QEMU кодом
+# успех/провал), вывод тестов в serial → stdio, без окна.
+test-args = [
+    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+    "-serial", "stdio",
+    "-display", "none",
+]
+# Код выхода QEMU при успехе: (0x10 << 1) | 1 = 33.
+test-success-exit-code = 33
+test-timeout = 60

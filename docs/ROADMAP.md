@@ -1,7 +1,8 @@
 # ferros — Roadmap
 
 Each milestone is a complete, observable result ("it now does X") and ends with a
-merged PR. We detail a milestone only when we reach it. Current status: **M0**.
+merged PR. We detail a milestone only when we reach it. Current status: **M2 next**
+(M0 and M1 are done).
 
 > This is **depth** (the path forward). For **breadth** — alternatives at each layer
 > (firmware, bootloader, runner, architecture, display) and where we could branch out

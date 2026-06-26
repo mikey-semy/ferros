@@ -3,8 +3,8 @@
 An operating system written from scratch in **Rust**, targeting **x86_64** with a
 **monolithic** kernel.
 
-> **Status: M0 — bootable kernel.** Very early. See [docs/ROADMAP.md](docs/ROADMAP.md)
-> for the full plan (milestones M0 → M12).
+> **Status: M1 — kernel infrastructure** (VGA `println!`, serial, in-QEMU tests).
+> See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan (milestones M0 → M12).
 
 ## What this is
 
