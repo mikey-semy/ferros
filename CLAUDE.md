@@ -34,13 +34,16 @@ truth for how we work in this repository.**
 
 ## Layout
 
-- `src/` — kernel source.
+- `src/` — kernel source, organized by subsystem (`arch`, `drivers`, `mm`, `sched`,
+  `syscall`, `fs`, `net`, `util`); all CPU/platform code is isolated under `arch/`.
 - `x86_64-ferros.json` — custom build target.
 - `.cargo/config.toml` — `build-std` + runner config.
 - `rust-toolchain.toml` — pinned toolchain (nightly + components).
 - `docs/ROADMAP.md` — full M0 → M12 plan.
 - `docs/ARCHITECTURE.md` — current architecture.
+- `docs/CONVENTIONS.md` — code-level conventions & patterns (how we write modules).
 - `docs/DECISIONS.md` — decision log.
+- `docs/HARDENING.md` — deferred "second pass" backlog (security/perf/real-hw).
 - `docs/CONTRIBUTING.md` — workflow details.
 - `docs/journal/` — per-milestone work log.
 

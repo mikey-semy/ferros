@@ -43,3 +43,20 @@ strategy changes. Downside: no external contributors while proprietary.
 first green build for reproducibility.
 **Why:** OS dev needs unstable features (`build-std`, custom targets,
 `custom_test_frameworks`) that stable does not provide.
+
+## D7 — Source layout: subsystem modules behind an `arch/` seam
+
+**Decision:** Organize `src/` by subsystem directories — `arch`, `drivers`, `mm`,
+`sched`, `syscall`, `fs`, `net`, `util` — instead of a flat file list, introduced at the
+start of M3 before the tree grows. All CPU/platform-specific code lives under
+`arch/<isa>/`; portable subsystems reach hardware only through the `arch` seam
+(`arch::init()`). Names use short, conventional kernel terms (`mm`, `fs`, `net`, …).
+Code-level patterns are recorded in [CONVENTIONS.md](CONVENTIONS.md), and consciously
+deferred hardening in [HARDENING.md](HARDENING.md).
+**Why:** The portable-vs-arch boundary is the one that is structurally expensive to
+retrofit, and the roadmap commits to ARM/RISC-V later — isolating it now keeps the
+portable kernel portable (a new arch = a new `arch/` submodule, nothing else moves).
+Subsystem directories prevent a flat "everything in `src/`" that becomes unnavigable at
+scale. Short names match Linux/BSD convention and read as professional rather than
+verbose. Shipped as its own `refactor(layout)` change with **no behavior change** (build
++ fmt + clippy green; existing tests compile and pass unchanged).
