@@ -1,10 +1,11 @@
 //! ferros — тонкая точка входа поверх библиотеки [`ferros`](../ferros/index.html).
 //!
-//! Вся «начинка» (драйверы VGA/serial, инфраструктура тестов) живёт в `src/lib.rs`.
-//! Здесь — только загрузочный `_start`, обработчик паники и приветствие.
+//! Вся «начинка» (драйверы, прерывания, память, инфраструктура тестов) живёт в
+//! `src/lib.rs` и подмодулях. Здесь — только вход, обработчик паники и приветствие.
 //!
-//! M0: загрузка. M1a: VGA + `println!`. M1b: serial + печать паники.
-//! M1c: код вынесен в библиотеку, добавлен тест-фреймворк (`cargo test` в QEMU).
+//! M0: загрузка. M1: VGA + serial + тесты. M2: GDT/IDT/PIC.
+//! M3a: получаем `BootInfo` через `entry_point!`, строим `OffsetPageTable` и
+//! демонстрируем трансляцию виртуальных адресов в физические.
 
 #![no_std]
 #![no_main]
@@ -12,17 +13,45 @@
 #![test_runner(ferros::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
-use ferros::{hlt_loop, println, serial_println};
+use ferros::{hlt_loop, mm, println, serial_println};
+use x86_64::{structures::paging::Translate, VirtAddr};
 
-/// Точка входа ядра. Bootloader (`bootloader` 0.9) прыгает на символ `_start`.
-#[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {
+// `entry_point!` генерирует `_start` за нас: проверяет, что сигнатура `kernel_main`
+// совпадает с тем, что передаёт bootloader, и безопасно прокидывает `&BootInfo`.
+// Это надёжнее, чем писать `extern "C" fn _start()` вручную и вытаскивать аргумент.
+entry_point!(kernel_main);
+
+/// Точка входа ядра. `bootloader` передаёт [`BootInfo`] — карту памяти и оффсет,
+/// по которому в виртуальном пространстве отображена вся физическая память.
+fn kernel_main(boot_info: &'static BootInfo) -> ! {
     ferros::init(); // GDT, IDT, PIC и включение прерываний
 
     println!("ferros booting...");
-    println!("VGA writer online: {}x{} text mode.", 80, 25);
     serial_println!("[serial] ferros COM1 online — debug channel ready");
+
+    // M3a: строим OffsetPageTable над активной иерархией таблиц и переводим
+    // несколько виртуальных адресов в физические — видно, что дерево таблиц
+    // прочитано верно (отображённые адреса дают Some, неотображённые — None).
+    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+    // SAFETY: оффсет получен от bootloader (фича map_physical_memory) и корректен;
+    // init вызывается ровно один раз.
+    let mapper = unsafe { mm::paging::init(phys_mem_offset) };
+
+    let addresses = [
+        0xb8000,                          // VGA-буфер → ожидаем Some(физ. адрес)
+        boot_info.physical_memory_offset, // база отображения физпамяти → Some
+        0xdead_beef,                      // ничем не отображён → None
+    ];
+    serial_println!("[mm] virt -> phys translations:");
+    for &address in &addresses {
+        let virt = VirtAddr::new(address);
+        let phys = mapper.translate_addr(virt);
+        // Диагностику шлём в serial — это наш отладочный канал (виден в логах/CI).
+        serial_println!("  {virt:?} -> {phys:?}");
+    }
+
     println!("ferros ready. Timer ticks below; type on the keyboard:");
 
     // В тестовом режиме сразу запускаем тесты вместо обычной работы.
@@ -33,10 +62,6 @@ pub extern "C" fn _start() -> ! {
 }
 
 /// Обработчик паники в обычном режиме: печатаем причину на экран и в serial.
-///
-/// Замечание: вызов `println!`/`serial_println!` из паники теоретически может
-/// попасть на уже захваченный замок. В M2 (с прерываниями) обернём это в
-/// `without_interrupts`, чтобы исключить дедлок.
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
