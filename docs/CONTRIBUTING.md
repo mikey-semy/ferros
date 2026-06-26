@@ -57,7 +57,7 @@ A `pre-push` git hook runs the same checks CI would:
 cargo fmt --check
 cargo clippy -- -D warnings
 cargo build
-# cargo test          # added at M1, once the QEMU test harness exists
+cargo test            # runs the kernel's tests inside QEMU
 ```
 
 The hook is version-controlled in the tracked `hooks/` directory. Activate it once
