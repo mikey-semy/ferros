@@ -5,6 +5,13 @@ merged PR. We detail a milestone only when we reach it. Current status: **M4 don
 (cooperative async — M4a/b/c; preemptive phase 2 — M4d context switch + kernel threads,
 M4e timer preemption; M0–M3 merged). **Next: M5** (userspace + syscalls, ring 3).
 
+> **North star (D8):** run the existing **Linux** software ecosystem rather than write a
+> native app ecosystem from scratch. Long-term aim is **ABI-level** compatibility
+> (unmodified Linux binaries), reached via a **POSIX syscall layer + libc first** (M5,
+> M9). Windows only via **Wine-class** layers on the Linux ABI; Wine itself is a far
+> aspiration, not a milestone. This choice **bites at M5 (next)** — so the syscall layer
+> there should be designed Linux-shaped from day one. See [DECISIONS.md](DECISIONS.md) D8.
+
 > This is **depth** (the path forward). For **breadth** — alternatives at each layer
 > (firmware, bootloader, runner, architecture, display) and where we could branch out
 > — see [LANDSCAPE.md](LANDSCAPE.md).
