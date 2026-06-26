@@ -57,6 +57,26 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   itself preempted, so it resolves on single-CPU, but it's wasteful). Needs a real
   blocking primitive once we care about throughput / SMP.
 
+## M5 — userspace + syscalls
+
+- **Single global syscall stack, no `swapgs`/per-CPU.** The `syscall` entry trampoline
+  switches to one global kernel stack via a RIP-relative static — correct only for a
+  single core and non-reentrant syscalls (we enter with IF=0). Real userspace needs a
+  per-CPU kernel stack selected via `swapgs` + `GS` base, and per-thread kernel stacks.
+- **User faults panic the kernel.** The page-fault / GPF handlers (M5a) `panic!` — fine
+  while there are no processes, but once M5c loads real programs a user fault must
+  terminate *the process*, not the kernel (and eventually become a signal).
+- **No W^X / NX on user pages.** `map_user_page` maps `PRESENT|WRITABLE|USER_ACCESSIBLE`
+  (the M5a probe page is both writable and executable). Add `NO_EXECUTE` + write-xor-execute
+  once the ELF loader sets per-segment permissions (M5c).
+- **No per-process address space yet (M5a).** The M5a probe runs in the kernel's address
+  space (user pages mapped in the free lower half). Per-process page tables (own PML4,
+  kernel higher-half shared) + CR3 switching come in M5c — until then there's no
+  user/user or user/kernel memory isolation between "processes".
+- **Bootstrap ring-3 entry is one-shot.** `enter_user`/`resume_kernel` do a single
+  kernel→user→kernel excursion via a global saved RSP; real scheduling of user threads
+  (timer-preempted ring 3 via `rsp0`, many processes) lands in M5c.
+
 ## Cross-cutting (whole kernel)
 
 - **No real-hardware validation** — QEMU only until M11 (UEFI + real drivers).
