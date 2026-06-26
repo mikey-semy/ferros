@@ -1,16 +1,14 @@
-//! Интеграционный тест M5b: первая пользовательская программа в **кольце 3** делает
-//! настоящие Linux-вызовы `write` и `exit`.
+//! Интеграционный тест M5c1: ядро загружает НАСТОЯЩИЙ, отдельно собранный ELF и
+//! запускает его в **кольце 3**.
 //!
-//! `main` поднимает пейджинг, маппит пользовательские страницы, копирует туда крошечную
-//! программу и строку, прыгает в кольцо 3. Программа печатает строку через `write(1, …)`
-//! и завершается `exit(0)`; на `exit` ядро раскручивается обратно сюда. Тест затем
-//! сверяет зафиксированное ядром.
+//! `main` поднимает пейджинг, отдаёт встроенный ELF (`user/hello`) загрузчику и прыгает в
+//! его точку входа. Программа делает `write(1, …)` и `exit(0)`; на `exit` ядро
+//! раскручивается обратно сюда. Тест сверяет зафиксированное ядром.
 //!
-//! Почему это доказательство: без рабочего перехода кольцо 3 ⇄ ядро был бы тройной сброс
-//! (QEMU перезагрузился бы) → таймаут. Совпадение длины и суммы байт доказывает, что ядро
-//! прочитало из памяти пользователя именно то, что нужно (через `uaccess`); совпадение
-//! `user_rsp` с вершиной user-стека — что код шёл в кольце 3 на своём стеке; а возврат
-//! управления — что `exit` дошёл до ядра и раскрутка сработала.
+//! Почему это доказательство: без рабочего перехода кольцо 3 ⇄ ядро (или при кривой
+//! загрузке ELF) был бы тройной сброс/фолт → таймаут. А зафиксированные fd, ненулевая
+//! длина, `user_rsp` на пользовательском стеке и факт `exit` показывают, что отдельно
+//! скомпилированная программа реально загрузилась, поработала в кольце 3 и завершилась.
 
 #![no_std]
 #![no_main]
@@ -23,9 +21,10 @@ extern crate alloc;
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
-use ferros::arch::x86_64::syscall::{run_user_hello, HELLO_MSG};
+use ferros::arch::x86_64::syscall::run_user_elf;
 use ferros::mm::frame::BootInfoFrameAllocator;
 use ferros::mm::paging;
+use ferros::syscall::elf::HELLO_ELF;
 use x86_64::VirtAddr;
 
 entry_point!(main);
@@ -42,10 +41,10 @@ fn main(boot_info: &'static BootInfo) -> ! {
     // SAFETY: карта памяти валидна, Usable-регионы свободны.
     let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
 
-    // Запуск первой пользовательской программы. Возврат — когда она сделает `exit`.
+    // Загрузка и запуск встроенного ELF. Возврат — когда программа сделает `exit`.
     // SAFETY: вызывается один раз; mapper/frame_allocator относятся к активной таблице,
-    // выбранные пользовательские адреса свободны.
-    let user_stack_top = unsafe { run_user_hello(&mut mapper, &mut frame_allocator) };
+    // адреса сегментов/стека свободны.
+    let user_stack_top = unsafe { run_user_elf(HELLO_ELF, &mut mapper, &mut frame_allocator) };
     USER_STACK_TOP.store(user_stack_top, Ordering::SeqCst);
 
     test_main();
@@ -57,36 +56,31 @@ fn panic(info: &PanicInfo) -> ! {
     ferros::test_panic_handler(info)
 }
 
-/// Программа кольца 3 сделала `write`, ядро его обработало, затем `exit` вернул управление.
+/// Отдельно собранный ELF загрузился, отработал в кольце 3 (`write`) и завершился (`exit`).
 #[test_case]
-fn ring3_write_and_exit() {
+fn elf_loads_runs_and_exits() {
     use ferros::syscall::{
-        EXIT_CALLS, LAST_EXIT_CODE, LAST_WRITE_FD, LAST_WRITE_LEN, LAST_WRITE_SUM,
-        LAST_WRITE_USER_RSP,
+        EXIT_CALLS, LAST_EXIT_CODE, LAST_WRITE_FD, LAST_WRITE_LEN, LAST_WRITE_USER_RSP,
     };
 
-    let expected_sum: u64 = HELLO_MSG.iter().map(|&b| b as u64).sum();
-
-    // (1) `write` дошёл до ядра в stdout (fd=1) через входной трамплин `syscall`.
+    // (1) программа сделала `write` в stdout (fd=1) через входной трамплин `syscall`...
     assert_eq!(LAST_WRITE_FD.load(Ordering::SeqCst), 1, "write fd mismatch");
-    // (2) ядро прочитало из памяти пользователя ровно нашу строку (длина + сумма байт).
-    assert_eq!(
-        LAST_WRITE_LEN.load(Ordering::SeqCst),
-        HELLO_MSG.len() as u64,
-        "write length mismatch"
+    // ...и записала непустой буфер (строку из своего загруженного .rodata через uaccess).
+    assert!(
+        LAST_WRITE_LEN.load(Ordering::SeqCst) > 0,
+        "write wrote nothing"
     );
-    assert_eq!(
-        LAST_WRITE_SUM.load(Ordering::SeqCst),
-        expected_sum,
-        "write content mismatch (uaccess read wrong bytes)"
+    // (2) программа шла в кольце 3 на своём стеке: user_rsp лежит ВНУТРИ страницы user-
+    //     стека (настоящая программа использует стек в прологе, поэтому rsp ниже вершины,
+    //     но в пределах [base, top]).
+    let top = USER_STACK_TOP.load(Ordering::SeqCst);
+    let base = top - 4096;
+    let rsp = LAST_WRITE_USER_RSP.load(Ordering::SeqCst);
+    assert!(
+        rsp > base && rsp <= top,
+        "write did not run on the ring-3 user stack: rsp={rsp:#x} not in ({base:#x}, {top:#x}]"
     );
-    // (3) программа шла в кольце 3 на своём стеке: user_rsp == вершине user-стека.
-    assert_eq!(
-        LAST_WRITE_USER_RSP.load(Ordering::SeqCst),
-        USER_STACK_TOP.load(Ordering::SeqCst),
-        "write did not run on the ring-3 user stack"
-    );
-    // (4) `exit` дошёл до ядра (раскрутка обратно сюда состоялась) с кодом 0.
+    // (3) `exit` дошёл до ядра (раскрутка обратно сюда состоялась) с кодом 0.
     assert!(
         EXIT_CALLS.load(Ordering::SeqCst) >= 1,
         "exit syscall never reached the kernel"

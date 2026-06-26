@@ -96,3 +96,20 @@ boundary before userspace (M5) accretes much more of it.
 **Why:** Memory-safety is Rust's whole pitch for an OS; an explicit `unsafe` boundary is
 the difference between "Rust kernel" and "kernel that happens to be in Rust." Recorded as
 *under study* rather than committed, since a full framekernel is a research-grade effort.
+
+## D10 — M5 sequencing: ELF binaries before per-process address spaces
+
+**Decision:** Within M5 (userspace), do **ELF loading first** (M5c1: load and run a real,
+separately-compiled static ELF in ring 3, in the *shared* kernel address space), and
+**defer true per-process address-space isolation** (own PML4 per process) to a later step
+(M5c2), aligned toward the higher-half / `bootloader` 0.11 migration (M11). User code is
+protected from reading kernel memory by the leaf-PTE `USER_ACCESSIBLE` bit; what's deferred
+is inter-process isolation and user-cannot-see-other-user.
+**Why:** `bootloader` 0.9 loads the kernel in the **lower** half (physmem at L4 index 3,
+heap at 170), so a clean per-process split (kernel in the higher half, user in the lower)
+isn't natural yet — doing it now means awkward "find a free L4 slot" surgery that the M11
+higher-half move makes trivial. ELF loading is **orthogonal** to isolation and is the
+higher-value step for the D8 north star (it's exactly how relibc/real programs will load),
+so it goes first. The two parts compose cleanly later: the ELF loader already takes a
+mapper, so pointing it at a per-process `AddressSpace` is a small change. ELF parser is
+**hand-rolled** (no new dependency) — minimal-deps + teach-as-we-go.

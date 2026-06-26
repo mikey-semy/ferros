@@ -1,0 +1,23 @@
+# Отдельная пользовательская программа (M5c1): собирается в самостоятельный статический
+# ELF под свой таргет (x86_64-user.json) и встраивается в ядро через build.rs. НЕ член
+# воркспейса ядра — иначе унаследовала бы дефолтный таргет ядра из его .cargo/config.toml.
+# Пустой [workspace] делает крейт самостоятельным корнем — cargo не пытается прицепить его
+# к пакету ядра уровнем выше (у того нет [workspace], но так надёжнее).
+[workspace]
+
+[package]
+name = "hello"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "hello"
+path = "src/main.rs"
+
+# panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

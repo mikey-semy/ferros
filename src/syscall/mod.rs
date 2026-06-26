@@ -20,6 +20,7 @@
 //! `unsafe`, D9); вывод — через драйверы. Здесь — чистая безопасная логика.
 
 pub mod abi;
+pub mod elf;
 pub mod uaccess;
 
 use crate::drivers::{serial, vga};
