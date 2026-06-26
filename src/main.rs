@@ -18,10 +18,16 @@ use ferros::{hlt_loop, println, serial_println};
 /// Точка входа ядра. Bootloader (`bootloader` 0.9) прыгает на символ `_start`.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    ferros::init(); // загрузить IDT до любой работы
+
     println!("ferros booting...");
     println!("VGA writer online: {}x{} text mode.", 80, 25);
-
     serial_println!("[serial] ferros COM1 online — debug channel ready");
+
+    // Демонстрация M2a: вызываем breakpoint. Обработчик напечатает кадр прерывания
+    // и вернёт управление сюда — ядро продолжит работу, а не упадёт.
+    x86_64::instructions::interrupts::int3();
+    println!("...survived the breakpoint - IDT works.");
 
     // В тестовом режиме сразу запускаем тесты вместо обычной работы.
     #[cfg(test)]
