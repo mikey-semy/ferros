@@ -18,6 +18,7 @@
 //! хотя бинарь сейчас наш собственный и заведомо корректный.
 
 use crate::arch::USER_SPACE_END;
+use alloc::collections::BTreeSet;
 use x86_64::structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, Size4KiB};
 use x86_64::VirtAddr;
 
@@ -116,6 +117,11 @@ pub fn load(
     }
 
     // --- Загрузка сегментов PT_LOAD ---
+    // Страницы, отображённые ИМЕННО этой загрузкой: два сегмента могут поделить граничную
+    // страницу — её надо пропустить (а не маппить дважды). Если же страница занята не нами
+    // (например, отображена ядром в общем адресном пространстве процесса), это коллизия —
+    // ошибка, а не «тихо затереть». Куча к этому моменту поднята (см. вызов в M5c2).
+    let mut mapped: BTreeSet<u64> = BTreeSet::new();
     for i in 0..phnum {
         let ph = phoff + i * phentsize;
         if read_u32(bytes, ph)? != PT_LOAD {
@@ -149,17 +155,20 @@ pub fn load(
             continue;
         }
 
-        // Маппим все страницы, покрывающие [p_vaddr, p_vaddr+p_memsz). Если страница уже
-        // отображена — это коллизия с чем-то посторонним (ядром или перекрывающимся
-        // сегментом): ОШИБКА, а не «тихо затереть». Наши сегменты постранично выровнены и
-        // не перекрываются (см. user/hello/linker.ld), так что легальных пересечений нет.
+        // Маппим все страницы, покрывающие [p_vaddr, p_vaddr+p_memsz).
         let first = Page::<Size4KiB>::containing_address(VirtAddr::new(p_vaddr));
         let last = Page::<Size4KiB>::containing_address(VirtAddr::new(mem_end - 1));
         for page in Page::range_inclusive(first, last) {
+            let start = page.start_address().as_u64();
+            if mapped.contains(&start) {
+                continue; // уже отобразили в этой загрузке (поделённая граничная страница)
+            }
             if mapper.translate_page(page).is_ok() {
+                // Занята не нами (ядро / посторонний маппинг) — не затираем.
                 return Err(ElfError::SegmentOverlapsExisting);
             }
             crate::mm::paging::map_user_page(page, mapper, frame_allocator);
+            mapped.insert(start);
         }
 
         // SAFETY: страницы [p_vaddr, mem_end) только что отображены present+writable+user в
