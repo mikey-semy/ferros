@@ -28,6 +28,13 @@ fn main() {
         println!("cargo:rerun-if-changed={user_dir}/{f}");
     }
 
+    // Удаляем прошлый ELF перед сборкой: cargo не отслеживает linker.ld / target.json как
+    // входы, поэтому при их изменении сам бы не перелинковал. Удаление принуждает к
+    // (быстрой) перелинковке, подхватывающей текущий скрипт/таргет. .o-файлы кэшируются,
+    // так что core/alloc не пересобираются.
+    let elf_out = format!("{user_dir}/target/x86_64-user/release/hello");
+    let _ = std::fs::remove_file(&elf_out);
+
     let mut cmd = Command::new("cargo");
     cmd.current_dir(user_dir).args(["build", "--release"]);
     // Снимаем «протёкшие» от внешнего cargo переменные, чтобы вложенная сборка
