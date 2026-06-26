@@ -4,12 +4,14 @@
 //! библиотеки) и `no_main` (без обычной `main` и рантайма). Bootloader передаёт
 //! управление по символу `_start`.
 //!
-//! M1a: вывод на экран теперь идёт через модуль [`vga_buffer`] и макрос `println!`,
-//! а не «сырым» циклом по адресу `0xb8000`.
+//! M1a: вывод на экран идёт через модуль [`vga_buffer`] и макрос `println!`.
+//! M1b: добавлен модуль [`serial`] — вывод в COM1 (`serial_println!`) для отладки
+//! и тестов, а panic-handler теперь печатает причину паники.
 
 #![no_std]
 #![no_main]
 
+mod serial;
 mod vga_buffer;
 
 use core::panic::PanicInfo;
@@ -24,14 +26,21 @@ pub extern "C" fn _start() -> ! {
     println!("ferros booting...");
     println!("VGA writer online: {}x{} text mode.", 80, 25);
 
+    serial_println!("[serial] ferros COM1 online — debug channel ready");
+
     halt_loop();
 }
 
 /// Обработчик паники. На голом железе стандартного нет — обязаны определить свой.
-/// Пока просто останавливаем процессор; печать причины паники добавим в M1b
-/// (через serial, чтобы не нарваться на дедлок VGA-замка).
+/// Печатаем причину и на экран (VGA), и в serial.
+///
+/// Замечание: пока что вызов `println!`/`serial_println!` из паники теоретически
+/// может попасть на уже захваченный замок. В M2 (с прерываниями) обернём вывод
+/// в `without_interrupts`, чтобы исключить дедлок.
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
+    println!("KERNEL PANIC: {info}");
+    serial_println!("KERNEL PANIC: {info}");
     halt_loop();
 }
 
