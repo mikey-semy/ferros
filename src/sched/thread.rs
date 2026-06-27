@@ -163,13 +163,14 @@ pub fn stop_preemption() {
 /// Если нет ни одного другого готового потока (так быть не должно — «нулевой» поток ядра
 /// всегда `Runnable`).
 pub fn exit_current() -> ! {
+    // Гарантируем IF=0 на всё завершение (switch_to_next переключает без сохранения IF).
     interrupts::disable();
-    interrupts::without_interrupts(|| {
+    {
         let mut guard = SCHEDULER.lock();
         let sched = guard.as_mut().expect("scheduler not initialized");
         let cur = sched.current;
         sched.threads[cur].state = State::Dead;
-    });
+    } // замок отпускаем здесь — switch_to_next возьмёт его снова
     switch_to_next();
     // switch_to_next ушёл в другой готовый поток; в мёртвый поток уже не вернутся.
     unreachable!("exit_current returned to a dead task");

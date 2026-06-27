@@ -117,6 +117,15 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
 - **Scheduler now carries an arch `PhysFrame` (CR3).** `sched::thread::Thread` holds
   `Option<PhysFrame>` and the switch goes through `arch::context::switch_task`; the data type
   leaks x86_64 into the portable scheduler. A neutral "address-space handle" is a later seam.
+- **Process address spaces snapshot the kernel's L4 at creation (M5c3a).**
+  `AddressSpace::new_sharing_kernel` copies the active L4 entries once; a kernel mapping
+  added *later* (a new L4 entry) would NOT appear in already-created process address spaces.
+  This is correct **only** because the kernel heap is a fixed, pre-mapped 100 KiB region
+  (one L4 entry, never grows) and the kernel maps no new L4 entries after boot — so process
+  kernel stacks (heap) and the loader's allocations always live in copied entries. A growing
+  heap / new kernel mappings (and SMP) would need to propagate kernel higher-half changes to
+  all process tables (the standard kernel concern); revisit with a dynamic heap / the
+  higher-half move (M11).
 - **No W^X / NX on loaded ELF segments (M5c1).** `mm::map_user_page` maps every user page
   `PRESENT|WRITABLE|USER_ACCESSIBLE`, so even an ELF's `.text` is writable and its `.data`
   is executable. The loader ignores `p_flags`. Honor per-segment R/W/X (and set `NO_EXECUTE`)
