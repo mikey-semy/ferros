@@ -44,6 +44,11 @@
 //! не замечает, что его подменяли — поэтому вытеснение работает на той же asm, что и
 //! кооперативный `yield`.
 
+use super::gdt;
+use x86_64::registers::control::Cr3;
+use x86_64::structures::paging::PhysFrame;
+use x86_64::VirtAddr;
+
 // Ассемблер: чистый пролог/эпилог без участия компилятора. Синтаксис Intel (по
 // умолчанию в Rust). Аргументы switch_context по System V: rdi = old_rsp (куда
 // сохранить текущий rsp), rsi = new_rsp (какой rsp восстановить).
@@ -77,9 +82,26 @@ core::arch::global_asm!(
     "    jmp 2b",
 );
 
+// Трамплин старта ПОЛЬЗОВАТЕЛЬСКОГО потока (M5c3): после первого переключения сюда
+// switch_context уже снял callee-saved, в которых [`init_user_thread_stack`] спрятал
+// параметры входа в кольцо 3: r15=точка входа, r14=вершина user-стека, r13=user CS,
+// r12=user SS. Трамплин собирает кадр `iretq` и уходит в кольцо 3 с IF=1 (поток
+// вытесняемый). CR3 на адресное пространство процесса уже переключён планировщиком.
+core::arch::global_asm!(
+    ".global ferros_user_thread_trampoline",
+    "ferros_user_thread_trampoline:",
+    "    push r12",   // SS = user_ss
+    "    push r14",   // RSP = вершина user-стека
+    "    push 0x202", // RFLAGS: IF=1 (бит 9) + зарезерв. бит 1 → вытесняемый кольцо-3 поток
+    "    push r13",   // CS = user_cs
+    "    push r15",   // RIP = точка входа
+    "    iretq",
+);
+
 extern "C" {
     fn ferros_switch_context(old_rsp: *mut u64, new_rsp: u64);
     fn ferros_thread_trampoline();
+    fn ferros_user_thread_trampoline();
 }
 
 /// Переключает контекст с текущего потока на другой.
@@ -128,4 +150,79 @@ pub unsafe fn init_thread_stack(stack_top: *mut u8, entry: extern "C" fn() -> !)
     sp.write(entry as usize as u64);
 
     sp as u64
+}
+
+/// Готовит **ядровый** стек нового пользовательского потока так, чтобы первое
+/// переключение на него ушло в [`ferros_user_thread_trampoline`], а тот `iretq`'нул в
+/// кольцо 3 на `entry` с пользовательским стеком `user_stack_top` (M5c3). Возвращает
+/// начальный `rsp` (в ядровом стеке) для сохранения в контексте потока.
+///
+/// Раскладка кадра (от старших адресов к младшим), под `pop`-последовательность
+/// `switch_context` (`r15,r14,r13,r12,rbx,rbp`, затем `ret`):
+/// `[user_trampoline][rbp=0][rbx=0][r12=user_ss][r13=user_cs][r14=user_stack][r15=entry]`.
+///
+/// # Safety
+///
+/// `kstack_top` — вершина выделенного, выровненного по 16 байт ЯДРОВОГО стека (минимум 7
+/// машинных слов). `entry`/`user_stack_top` должны указывать в отображённую и доступную из
+/// кольца 3 память адресного пространства этого процесса; `user_cs`/`user_ss` — валидные
+/// селекторы кольца 3 (RPL=3). CR3 на адресное пространство процесса переключает
+/// планировщик перед первым входом.
+pub unsafe fn init_user_thread_stack(
+    kstack_top: *mut u8,
+    entry: u64,
+    user_stack_top: u64,
+    user_cs: u64,
+    user_ss: u64,
+) -> u64 {
+    let mut sp = kstack_top as *mut u64;
+    let mut push = |value: u64| {
+        // SAFETY: sp идёт вниз по выделенному ядровому стеку достаточного размера.
+        unsafe {
+            sp = sp.sub(1);
+            sp.write(value);
+        }
+    };
+
+    push(ferros_user_thread_trampoline as *const () as u64); // адрес возврата (ret → трамплин)
+    push(0); // rbp
+    push(0); // rbx
+    push(user_ss); // r12
+    push(user_cs); // r13
+    push(user_stack_top); // r14
+    push(entry); // r15
+
+    sp as u64
+}
+
+/// Корень таблиц страниц (PML4) текущего адресного пространства — из `CR3`. Планировщик
+/// запоминает им адресное пространство ядра, чтобы возвращаться в него.
+pub fn current_address_space() -> PhysFrame {
+    Cr3::read().0
+}
+
+/// Переключение задачи планировщиком (M5c3): ставит стек ядра следующей задачи (rsp0 в
+/// TSS), при необходимости переключает адресное пространство (`CR3`) и затем переключает
+/// контекст ([`switch_context`]). Объединено в один арх-шов, чтобы переносимый `sched` не
+/// трогал `CR3`/TSS напрямую.
+///
+/// Память ядра отображена в КАЖДОМ адресном пространстве (общие L4-записи), поэтому всё,
+/// чего касается `switch_context` (стеки/таблицы ядра), доступно и после смены `CR3`.
+///
+/// # Safety
+/// Вызывать с **выключенными прерываниями** (как [`switch_context`]). `old_rsp`/`new_rsp` —
+/// валидные контексты потоков; `next_cr3` — корректный PML4, в котором отображено ядро;
+/// `next_rsp0` — вершина стека ядра следующей задачи.
+pub unsafe fn switch_task(old_rsp: *mut u64, new_rsp: u64, next_cr3: PhysFrame, next_rsp0: u64) {
+    // SAFETY: rsp0 пишем с IF=0 (требование set_kernel_stack).
+    unsafe { gdt::set_kernel_stack(VirtAddr::new(next_rsp0)) };
+
+    let (active, flags) = Cr3::read();
+    if next_cr3 != active {
+        // SAFETY: next_cr3 — валидный PML4 с отображённым ядром; переключаемся на него.
+        unsafe { Cr3::write(next_cr3, flags) };
+    }
+
+    // SAFETY: см. контракт функции; контексты валидны, прерывания выключены.
+    unsafe { switch_context(old_rsp, new_rsp) };
 }
