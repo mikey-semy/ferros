@@ -53,9 +53,11 @@ fn main(boot_info: &'static BootInfo) -> ! {
     debug_assert_eq!(fa.free_list_len(), 0);
     let cursor_before = fa.cursor();
 
-    // Создаём пространство и маппим в него PAGES пользовательских страниц.
-    // SAFETY: phys_offset корректен.
-    let space = unsafe { AddressSpace::new_sharing_kernel(phys_mem_offset, &mut fa) };
+    // Создаём пространство и маппим в него PAGES пользовательских страниц. Активна таблица
+    // ядра, поэтому она и есть kernel_pml4.
+    let kernel_pml4 = x86_64::registers::control::Cr3::read().0;
+    // SAFETY: phys_offset корректен; kernel_pml4 — активная (ядровая) таблица.
+    let space = unsafe { AddressSpace::new_sharing_kernel(phys_mem_offset, kernel_pml4, &mut fa) };
     {
         // SAFETY: один живой маппер на это пространство; оно не активно — маппинг (запись
         // записей таблиц) активного CR3 не требует, содержимое страниц мы не пишем.
