@@ -13,10 +13,16 @@
 
 // --- Номера системных вызовов (Linux x86-64) ---
 
-/// `read(fd, buf, count)` — пока не реализован, номер зарезервирован за Linux-значением.
+/// `read(fd, buf, count)`.
 pub const SYS_READ: u64 = 0;
 /// `write(fd, buf, count)`.
 pub const SYS_WRITE: u64 = 1;
+/// `open(path, flags, mode)` — открыть файл, вернуть дескриптор.
+pub const SYS_OPEN: u64 = 2;
+/// `close(fd)`.
+pub const SYS_CLOSE: u64 = 3;
+/// `lseek(fd, offset, whence)` — сдвинуть позицию чтения.
+pub const SYS_LSEEK: u64 = 8;
 /// `exit(status)` — завершить вызывающий поток.
 pub const SYS_EXIT: u64 = 60;
 /// `exit_group(status)` — завершить все потоки процесса (для нас пока то же, что `exit`).
@@ -24,9 +30,15 @@ pub const SYS_EXIT_GROUP: u64 = 231;
 
 // --- Коды ошибок (errno, положительные; в `rax` возвращаются как `-errno`) ---
 
+/// Нет такого файла или каталога.
+pub const ENOENT: i64 = 2;
 /// Плохой файловый дескриптор.
 pub const EBADF: i64 = 9;
 /// Некорректный адрес (указатель вне доступной пользователю памяти).
 pub const EFAULT: i64 = 14;
+/// Некорректный аргумент.
+pub const EINVAL: i64 = 22;
+/// Слишком много открытых файлов (исчерпана таблица дескрипторов процесса).
+pub const EMFILE: i64 = 24;
 /// Системный вызов не реализован.
 pub const ENOSYS: i64 = 38;

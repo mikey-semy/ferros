@@ -21,6 +21,7 @@
 
 pub mod abi;
 pub mod elf;
+pub mod files;
 pub mod uaccess;
 
 use crate::drivers::{serial, vga};
@@ -53,6 +54,10 @@ pub static USER_FAULT_KILLS: AtomicU64 = AtomicU64::new(0);
 pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
     match nr {
         abi::SYS_WRITE => sys_write(args[0], args[1], args[2], user_rsp),
+        abi::SYS_OPEN => files::sys_open(args[0]),
+        abi::SYS_READ => files::sys_read(args[0], args[1], args[2]),
+        abi::SYS_CLOSE => files::sys_close(args[0]),
+        abi::SYS_LSEEK => files::sys_lseek(args[0], args[1] as i64, args[2]),
         abi::SYS_EXIT | abi::SYS_EXIT_GROUP => {
             LAST_EXIT_CODE.store(args[0] as i64, Ordering::SeqCst);
             EXIT_CALLS.fetch_add(1, Ordering::SeqCst);

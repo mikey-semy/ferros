@@ -23,9 +23,13 @@
 //! отображение не меняется (на SMP нужен fault-fixup/extable — см. HARDENING.md).
 
 use super::abi;
+use alloc::vec::Vec;
 // Граница пользовательской/ядерной половин — арх-специфична, берём её из `arch`-шва (D7),
 // чтобы этот переносимый модуль не зашивал разметку конкретной архитектуры.
 use crate::arch::USER_SPACE_END;
+
+/// Максимальная длина пути, читаемого из памяти пользователя (M6d2).
+const PATH_MAX: usize = 256;
 
 /// Проверяет, что диапазон `[ptr, ptr+len)` целиком в пользовательской половине и не
 /// переполняется. Возвращает `Err(EFAULT)`, если нет.
@@ -59,4 +63,56 @@ pub fn with_user_bytes<R>(ptr: u64, len: u64, f: impl FnOnce(&[u8]) -> R) -> Res
     // обработчика, поэтому доступ не упадёт; вид не живёт дольше `f`.
     let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
     Ok(f(bytes))
+}
+
+/// Копирует `src` В буфер пользователя по адресу `dst` (для `read`: отдаём прочитанные
+/// байты). Проверяет, что весь диапазон в пользовательской половине и отображён как
+/// **записываемый пользовательский** — иначе `Err(EFAULT)`, ничего не записав.
+pub fn copy_to_user(dst: u64, src: &[u8]) -> Result<(), i64> {
+    let len = src.len() as u64;
+    validate(dst, len)?;
+    if src.is_empty() {
+        return Ok(());
+    }
+    if !crate::mm::paging::user_range_accessible(dst, len, true) {
+        return Err(abi::EFAULT);
+    }
+    // SAFETY: диапазон проверен (пользовательская половина, present+user+writable); IF=0,
+    // поэтому отображение стабильно; пишем ровно `src.len()` байт, буферы не пересекаются
+    // (src — память ядра, dst — пользователя).
+    unsafe {
+        core::ptr::copy_nonoverlapping(src.as_ptr(), dst as *mut u8, src.len());
+    }
+    Ok(())
+}
+
+/// Читает из памяти пользователя нуль-терминированную строку (путь для `open`), начиная с
+/// `ptr`, не длиннее [`PATH_MAX`]. Идёт постранично (каждая страница предпроверяется
+/// `with_user_bytes`), останавливается на нулевом байте. `Err(EFAULT)` на недоступной
+/// странице, `Err(EINVAL)` если нуль не встретился в пределах лимита.
+pub fn read_user_cstr(ptr: u64) -> Result<Vec<u8>, i64> {
+    let mut out = Vec::new();
+    let mut addr = ptr;
+    loop {
+        // Читаем до конца текущей страницы (но не больше остатка лимита) — так не пересекаем
+        // границу страницы в одном `with_user_bytes` (следующая может быть не отображена).
+        let page_end = (addr | 0xFFF) + 1;
+        let chunk_len = (page_end - addr).min((PATH_MAX - out.len()) as u64);
+        if chunk_len == 0 {
+            return Err(abi::EINVAL); // достигли PATH_MAX без нулевого байта
+        }
+        let hit_nul = with_user_bytes(addr, chunk_len, |bytes| {
+            for &b in bytes {
+                if b == 0 {
+                    return true;
+                }
+                out.push(b);
+            }
+            false
+        })?;
+        if hit_nul {
+            return Ok(out);
+        }
+        addr = page_end;
+    }
 }

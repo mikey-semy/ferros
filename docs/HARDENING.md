@@ -205,6 +205,22 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   allocator. The virtqueue/buffer frames are allocated once and never freed (M3 item). A
   trait for contiguous/DMA allocation would decouple it.
 
+- **File syscalls are minimal and read-only (M6d2).** `open`/`read`/`close`/`lseek` exist,
+  but: `open` reads the **whole file into memory** (no streaming/`mmap`, no large-file
+  support) and ignores `flags`/`mode`; there's **no** `write`/`create`/`unlink`/`stat`/`dup`,
+  no `O_*` flags, no directories (root, 8.3 names — the M6c FAT limits), and `read` on fd 0
+  (stdin) isn't a thing. Paths are capped at 256 bytes. A real file model (streaming, write,
+  a proper VFS with mount points/inodes) is later work.
+- **Per-process fd table keyed by CR3, leaks on exit (M6d2).** `syscall::files` stores each
+  process's open files in a `BTreeMap` keyed by its PML4 physical address (avoids touching
+  the scheduler). Correct **only because frames are never reused** (the allocator doesn't
+  free — M3): a recycled PML4 frame would inherit a dead process's fds. On `exit` the entry
+  is **not** removed (zombie leak) — when reaping lands, clear `PROCESSES[cr3]` there.
+- **A syscall holds the process-files lock across copy-to-user (M6d2).** `sys_read` keeps the
+  global `PROCESSES` `Mutex` while it `copy_to_user`s the data. Safe on single-CPU (syscalls
+  run `IF=0`, no ISR touches the map), but on SMP this serialises all file I/O and a blocking
+  copy under the lock would be bad. Pairs with the non-preemptible-syscall limitation.
+
 ## Cross-cutting (whole kernel)
 
 - **No real-hardware validation** — QEMU only until M11 (UEFI + real drivers).
