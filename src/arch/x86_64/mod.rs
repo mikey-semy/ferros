@@ -7,6 +7,7 @@
 pub mod context;
 pub mod gdt;
 pub mod interrupts;
+pub mod io;
 pub mod pci;
 pub mod syscall;
 

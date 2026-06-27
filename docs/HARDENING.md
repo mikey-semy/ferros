@@ -167,6 +167,22 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
 - **Disk image is a build artifact, not a fixture (M6a).** `build.rs` generates a 4 MiB raw
   `target/ferros-disk.img` with a known signature; it's regenerated on size/signature
   mismatch only. M6c will format it as FAT (likely via a host-side `fatfs` build-dependency).
+- **virtio-blk is polled, single-request, read-only (M6b).** The driver suppresses the
+  device interrupt (`VIRTQ_AVAIL_F_NO_INTERRUPT`) and busy-polls the used ring — no IRQ
+  handler, so a `read_sector` blocks the caller (and, under the global `DEVICE` Mutex,
+  everyone) until the device replies; there's also no poll timeout, so a wedged device hangs
+  the kernel. Only one descriptor chain (desc 0..2) is reused, so there's no queue depth /
+  async I/O. No write/flush path. The read bounces device→DMA page→caller (an extra copy)
+  and serves exactly one 512-byte sector per request — M6c (FAT) will want multi-sector
+  reads and may read straight into the caller's buffer. Interrupt-driven, multi-request,
+  writable I/O is a later pass (needs MSI/INTx handling + a real block layer).
+- **Accept-zero-features negotiation (M6b).** The driver writes Driver Features = 0 (enough
+  for basic legacy read) and doesn't inspect Device Features — it never checks
+  `VIRTIO_BLK_F_RO`, block-size, or geometry. Real negotiation comes with write support.
+- **`virtio_blk::init` is bound to `BootInfoFrameAllocator` (M6b).** It needs
+  `allocate_contiguous` (not on the `FrameAllocator` trait), so it takes the concrete
+  allocator. The virtqueue/buffer frames are allocated once and never freed (M3 item). A
+  trait for contiguous/DMA allocation would decouple it.
 
 ## Cross-cutting (whole kernel)
 
