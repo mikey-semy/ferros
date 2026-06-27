@@ -26,11 +26,17 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
 
 ## M3 — memory
 
-- **Slow allocators (performance).** The frame allocator (M3b) is O(n) per
-  `allocate_frame` and never frees frames; the heap (M3c, `linked_list_allocator`) is
-  O(n) first-fit and fragments. Replace with a bitmap/buddy frame allocator and a
+- **Slow allocators (performance).** The frame allocator (M3b) is O(n) per *fresh*
+  `allocate_frame` (it recycles freed single frames via a free-list since M6e1, but still
+  rescans `usable_frames` when bumping the cursor); the heap (M3c, `linked_list_allocator`)
+  is O(n) first-fit and fragments. Replace with a bitmap/buddy frame allocator and a
   fixed-size-block (slab) heap on the hot path. Deferred deliberately: correctness-first
   bring-up — these are pure speed wins, not correctness.
+- **Frame allocator: single-frame free only, no coalescing (M6e1).** `deallocate_frame`
+  recycles individual frames via an intrusive LIFO free-list, but there's no buddy/coalescing,
+  and **contiguous runs (`allocate_contiguous`, virtio virtqueues) are never freed** (bump-only,
+  can't be reassembled from the LIFO list). Fine while virtio lives forever; a device teardown
+  path would need a contiguous-aware allocator.
 - **No W^X / NX.** Heap and mapped pages are `PRESENT | WRITABLE` with no `NO_EXECUTE`;
   nothing enforces write-xor-execute. Revisit with userspace (M5).
 - **No guard pages.** Around the kernel heap region; a heap overrun silently corrupts

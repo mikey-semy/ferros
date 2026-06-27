@@ -56,6 +56,12 @@ pending (needs a freeing frame allocator), a planned pre-M7 consolidation.
     - **M6d2 — VFS + file syscalls** (done). `open`/`read`/`close`/`lseek` (Linux numbers
       2/0/3/8), per-process fd table (keyed by the process's CR3), copy-to-user, a minimal
       VFS facade over FAT; a ring-3 program opens and reads a file from disk.
+- **Maturity phase (pre-M7 consolidation).** Floor-first hardening before the shell:
+  - **M6e — Memory reclamation.** The kernel must stop leaking on process exit. Stages:
+    **M6e1 — freeing frame allocator** (done; free-list + `deallocate_frame`), **M6e2 —
+    address-space teardown**, **M6e3 — process reaping**.
+  - Then breadth feeding M7: **process model** (fork/exec/wait + signals), then **filesystem**
+    (write + subdirectories + a real VFS).
 - **M7 — Shell.** init process, interactive shell, basic utilities, line editing.
 
 ## Tier D — A "real" OS
