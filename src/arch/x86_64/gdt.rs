@@ -1,5 +1,5 @@
 //! GDT (Global Descriptor Table) + TSS: сегменты ядра и пользователя, аварийный стек
-//! для double fault и стек ядра для входа из кольца 3.
+//! для double fault и стек ядра для входа из кольца 3 (rsp0).
 //!
 //! # Зачем (double fault)
 //!
@@ -14,13 +14,17 @@
 //! уровня нужен свой сегмент кода/данных в GDT. Инструкции `syscall`/`sysret` берут
 //! селекторы колец из MSR **STAR**, и аппаратно требуют строгий порядок четырёх
 //! сегментов: ядро `SS = CS + 8`, пользователь `SS = sysret_base + 8`, `CS = base + 16`.
-//! Поэтому раскладка фиксирована: `kernel_code, kernel_data, user_data, user_code`
-//! (см. [`crate::arch::x86_64::syscall`], где эти селекторы скармливаются `Star::write`).
+//! Поэтому раскладка фиксирована: `kernel_code, kernel_data, user_data, user_code`.
 //!
-//! Когда из кольца 3 прилетает **прерывание/исключение**, процессор переключается на
-//! стек ядра из `TSS.privilege_stack_table[0]` (rsp0) — иначе он остался бы на
-//! пользовательском (недоверенном) стеке.
+//! # rsp0 — на каждый процесс свой (M5c3)
+//!
+//! Когда из кольца 3 прилетает прерывание/исключение, процессор переключается на стек
+//! ядра из `TSS.privilege_stack_table[0]` (rsp0). При вытесняющей многозадачности у
+//! каждого пользовательского потока — свой стек ядра, поэтому rsp0 **меняется на каждом
+//! переключении** ([`set_kernel_stack`]). Значит TSS должен быть изменяемым в рантайме —
+//! держим его в [`UnsafeCell`] (одно ядро, пишем только с выключенными прерываниями).
 
+use core::cell::UnsafeCell;
 use spin::LazyLock;
 use x86_64::instructions::segmentation::{Segment, CS, SS};
 use x86_64::instructions::tables::load_tss;
@@ -34,9 +38,10 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 /// Размер статического стека ядра (5 страниц по 4 КиБ).
 const KSTACK_SIZE: usize = 4096 * 5;
 
-/// Аварийный стек для double fault (IST). Процессору отдаём верхнюю границу.
+/// Аварийный стек для double fault (IST).
 static mut DF_STACK: [u8; KSTACK_SIZE] = [0; KSTACK_SIZE];
-/// Стек ядра для входа из кольца 3 по прерыванию/исключению (TSS rsp0).
+/// Стек ядра по умолчанию для входа из кольца 3 (rsp0) — пока не запущен пользовательский
+/// поток со своим стеком. Процессору отдаём верхнюю границу.
 static mut PRIV_STACK: [u8; KSTACK_SIZE] = [0; KSTACK_SIZE];
 
 /// Верхняя граница (старший адрес) статического стека `stack`.
@@ -46,17 +51,27 @@ fn stack_top(stack: *const [u8; KSTACK_SIZE]) -> VirtAddr {
     VirtAddr::from_ptr(stack) + KSTACK_SIZE as u64
 }
 
-/// TSS: аварийный IST-стек для double fault + стек ядра (rsp0) для входа из кольца 3.
-static TSS: LazyLock<TaskStateSegment> = LazyLock::new(|| {
-    let mut tss = TaskStateSegment::new();
-    // SAFETY: &raw const не создаёт ссылку на static mut; стек используется только
-    // процессором как аварийный стек обработчика double fault.
-    tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = stack_top(&raw const DF_STACK);
-    // rsp0: на него процессор переключается при входе кольцо 3 → кольцо 0 по
-    // прерыванию/исключению. SAFETY: то же — &raw const, стек только для процессора.
-    tss.privilege_stack_table[0] = stack_top(&raw const PRIV_STACK);
-    tss
-});
+/// Обёртка над TSS с внутренней изменяемостью: rsp0 надо менять в рантайме на каждом
+/// переключении потоков (M5c3), а `LazyLock`/обычный `static` это не дают.
+struct MutableTss(UnsafeCell<TaskStateSegment>);
+// SAFETY: одно ядро; к TSS обращаемся либо при инициализации, либо из переключения
+// контекста с выключенными прерываниями — конкурентного доступа нет.
+unsafe impl Sync for MutableTss {}
+
+/// Глобальный TSS. `TaskStateSegment::new()` — `const`, поэтому статик; поля (IST, rsp0)
+/// заполняем в [`init`] (адреса стеков — рантайм-значения).
+static TSS: MutableTss = MutableTss(UnsafeCell::new(TaskStateSegment::new()));
+
+/// Меняет rsp0 (стек ядра для входа из кольца 3) — вызывается при переключении на
+/// пользовательский поток, чтобы прерывание из кольца 3 село на стек ИМЕННО этого потока.
+///
+/// # Safety
+/// Вызывать только с выключенными прерываниями (как делает переключение контекста): иначе
+/// прерывание могло бы прочитать rsp0 в момент записи.
+pub unsafe fn set_kernel_stack(rsp0: VirtAddr) {
+    // SAFETY: одно ядро, прерывания выключены — эксклюзивный доступ к полю TSS.
+    unsafe { (*TSS.0.get()).privilege_stack_table[0] = rsp0 };
+}
 
 /// Селекторы сегментов, нужные после загрузки GDT и для настройки `syscall` (M5).
 pub struct Selectors {
@@ -72,15 +87,17 @@ pub struct Selectors {
     pub tss: SegmentSelector,
 }
 
-/// GDT + селекторы. Порядок сегментов фиксирован требованием `syscall`/`sysret`
-/// (см. модульную доку): `kernel_code, kernel_data, user_data, user_code`, затем TSS.
+/// GDT + селекторы. Порядок сегментов фиксирован требованием `syscall`/`sysret`:
+/// `kernel_code, kernel_data, user_data, user_code`, затем TSS.
 static GDT: LazyLock<(GlobalDescriptorTable, Selectors)> = LazyLock::new(|| {
     let mut gdt = GlobalDescriptorTable::new();
     let kernel_code = gdt.append(Descriptor::kernel_code_segment());
     let kernel_data = gdt.append(Descriptor::kernel_data_segment());
     let user_data = gdt.append(Descriptor::user_data_segment());
     let user_code = gdt.append(Descriptor::user_code_segment());
-    let tss = gdt.append(Descriptor::tss_segment(&TSS));
+    // SAFETY: дескриптору TSS нужен только адрес TSS (база+лимит), а не его содержимое;
+    // живой ссылки мы не держим — она нужна лишь на момент построения дескриптора.
+    let tss = gdt.append(Descriptor::tss_segment(unsafe { &*TSS.0.get() }));
     (
         gdt,
         Selectors {
@@ -101,6 +118,14 @@ pub fn selectors() -> &'static Selectors {
 /// Загружает GDT, перезагружает `CS`/`SS` на сегменты ядра и активирует TSS (`ltr`).
 /// Вызывать до загрузки IDT (та ссылается на IST-индекс из TSS).
 pub fn init() {
+    // Заполняем TSS до его активации: IST-стек для double fault и стек rsp0 по умолчанию.
+    // SAFETY: одно ядро, прерывания ещё выключены (до `sti` в arch::init); эксклюзивно.
+    unsafe {
+        let tss = &mut *TSS.0.get();
+        tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = stack_top(&raw const DF_STACK);
+        tss.privilege_stack_table[0] = stack_top(&raw const PRIV_STACK);
+    }
+
     GDT.0.load();
     // SAFETY: селекторы получены из только что загруженной GDT и валидны. `SS`
     // обязательно переустановить: после смены раскладки GDT старый селектор стека от
