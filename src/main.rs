@@ -134,31 +134,27 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     #[cfg(test)]
     test_main();
 
-    // M5c3: планировщик + пользовательские ПРОЦЕССЫ как планируемые задачи. Спавним ДВА
-    // процесса из встроенного ELF — у каждого своё изолированное адресное пространство и
-    // свой стек ядра; каждый исполнится в кольце 3, когда планировщик на него переключится.
-    // Рядом — фоновые потоки ядра A/B (M4e). Включаем вытеснение: одно ядро честно делят
-    // два процесса (каждый печатает строку через `write` и завершается `exit`), потоки A/B
-    // и executor на «нулевом» потоке.
+    // M5c3/M6d2: планировщик + пользовательские ПРОЦЕССЫ как планируемые задачи. Спавним
+    // «hello» (печатает строку через `write` и выходит) и «reader» (M6d2: открывает и читает
+    // файл с диска через файловые сисколлы, печатает его содержимое). У каждого своё
+    // изолированное адресное пространство и свой стек ядра. Рядом — фоновые потоки ядра A/B
+    // (M4e). Включаем вытеснение: одно ядро честно делят процессы, потоки A/B и executor.
     thread::init();
     // SAFETY: phys_mem_offset корректен, куча поднята; адреса процессов — в свободном у
     // ядра слоте (у каждого — в своём адресном пространстве).
-    for _ in 0..2 {
+    for elf in [
+        ferros::syscall::elf::HELLO_ELF,
+        ferros::syscall::elf::READER_ELF,
+    ] {
         unsafe {
-            ferros::arch::x86_64::syscall::spawn_user(
-                ferros::syscall::elf::HELLO_ELF,
-                phys_mem_offset,
-                &mut frame_allocator,
-            )
+            ferros::arch::x86_64::syscall::spawn_user(elf, phys_mem_offset, &mut frame_allocator)
         };
     }
     thread::spawn(worker_a);
     thread::spawn(worker_b);
     thread::start_preemption();
 
-    println!(
-        "ferros ready. Two user processes + threads A/B run preemptively; type on the keyboard:"
-    );
+    println!("ferros ready. User processes (hello + file reader) + threads A/B run preemptively:");
 
     // M4b: эффективный экзекьютор — это и есть «жизнь» ядра после старта. Он гоняет
     // async-задачи, а когда делать нечего — спит на `hlt` (CPU не жжёт впустую). Теперь

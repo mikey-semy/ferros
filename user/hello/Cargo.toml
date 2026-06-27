@@ -21,6 +21,11 @@ path = "src/main.rs"
 name = "faulter"
 path = "src/faulter.rs"
 
+# Программа-«читатель» (M6d2): открывает и читает файл с диска через файловые сисколлы.
+[[bin]]
+name = "reader"
+path = "src/reader.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"

@@ -1,11 +1,11 @@
 # ferros — Roadmap
 
 Each milestone is a complete, observable result ("it now does X") and ends with a
-merged PR. We detail a milestone only when we reach it. Current status: **M5 done**
-(ring 3; Linux-shaped `write`/`exit`; real ELF loading; per-process address spaces;
-processes as scheduled tasks with preemption; multiple processes + a ring-3 fault kills
-the process, not the kernel; M0–M4 merged). **Next: M6** (storage + filesystem) —
-process reaping / polish still pending (needs a freeing frame allocator).
+merged PR. We detail a milestone only when we reach it. Current status: **M6 done**
+(PCI enumeration; virtio-blk disk over DMA; hand-rolled FAT32 read; fault-tolerant
+`uaccess`; VFS + `open`/`read`/`close`/`lseek` — a user process reads a file from disk;
+M0–M5 merged). **Next: M7** (init process + shell) — process reaping / polish still
+pending (needs a freeing frame allocator), a planned pre-M7 consolidation.
 
 > **North star (D8):** run the existing **Linux** software ecosystem rather than write a
 > native app ecosystem from scratch. Long-term aim is **ABI-level** compatibility
@@ -53,8 +53,9 @@ process reaping / polish still pending (needs a freeing frame allocator).
     - **M6d1 — Fault-tolerant `uaccess`** (done). `with_user_bytes` pre-validates the user
       range against the page tables → `-EFAULT` instead of a kernel panic on a bad pointer
       (the consolidation trigger before user buffers proliferate in `read`).
-    - **M6d2 — VFS + file syscalls:** `open`/`read`/`close`/`lseek`, per-process fd table,
-      copy-to-user; a user program reads a file from disk.
+    - **M6d2 — VFS + file syscalls** (done). `open`/`read`/`close`/`lseek` (Linux numbers
+      2/0/3/8), per-process fd table (keyed by the process's CR3), copy-to-user, a minimal
+      VFS facade over FAT; a ring-3 program opens and reads a file from disk.
 - **M7 — Shell.** init process, interactive shell, basic utilities, line editing.
 
 ## Tier D — A "real" OS
