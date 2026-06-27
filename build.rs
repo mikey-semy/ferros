@@ -19,6 +19,7 @@ fn main() {
     // Пересобирать пользовательскую программу при изменении её исходников/конфигурации.
     for f in [
         "src/main.rs",
+        "src/faulter.rs",
         "Cargo.toml",
         "Cargo.lock",
         "linker.ld",
@@ -28,12 +29,18 @@ fn main() {
         println!("cargo:rerun-if-changed={user_dir}/{f}");
     }
 
-    // Удаляем прошлый ELF перед сборкой: cargo не отслеживает linker.ld / target.json как
+    // Бинари пользовательского крейта и переменные окружения, под которыми ядро их
+    // встраивает. Единый список — чтобы удаление и проброс путей не разъезжались.
+    let binaries = [("hello", "USER_HELLO_ELF"), ("faulter", "USER_FAULTER_ELF")];
+
+    // Удаляем прошлые ELF перед сборкой: cargo не отслеживает linker.ld / target.json как
     // входы, поэтому при их изменении сам бы не перелинковал. Удаление принуждает к
     // (быстрой) перелинковке, подхватывающей текущий скрипт/таргет. .o-файлы кэшируются,
     // так что core/alloc не пересобираются.
-    let elf_out = format!("{user_dir}/target/x86_64-user/release/hello");
-    let _ = std::fs::remove_file(&elf_out);
+    let out_dir = format!("{user_dir}/target/x86_64-user/release");
+    for (bin, _) in binaries {
+        let _ = std::fs::remove_file(format!("{out_dir}/{bin}"));
+    }
 
     let mut cmd = Command::new("cargo");
     cmd.current_dir(user_dir).args(["build", "--release"]);
@@ -61,16 +68,19 @@ fn main() {
         .expect("failed to run `cargo build` for user/hello");
     assert!(status.success(), "building user/hello failed");
 
-    // Абсолютный путь к собранному ELF (через CARGO_MANIFEST_DIR ядра — чистый путь без
-    // префикса \\?\, который даёт canonicalize на Windows).
+    // Абсолютные пути к собранным ELF (через CARGO_MANIFEST_DIR ядра — чистый путь без
+    // префикса \\?\, который даёт canonicalize на Windows). Отдаём каждый ядру через
+    // переменную окружения для `include_bytes!`.
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-    let elf = PathBuf::from(manifest)
-        .join(user_dir)
-        .join("target/x86_64-user/release/hello");
-    assert!(
-        elf.exists(),
-        "user ELF not found after build: {}",
-        elf.display()
-    );
-    println!("cargo:rustc-env=USER_HELLO_ELF={}", elf.display());
+    for (bin, env) in binaries {
+        let elf = PathBuf::from(&manifest)
+            .join(user_dir)
+            .join(format!("target/x86_64-user/release/{bin}"));
+        assert!(
+            elf.exists(),
+            "user ELF not found after build: {}",
+            elf.display()
+        );
+        println!("cargo:rustc-env={env}={}", elf.display());
+    }
 }

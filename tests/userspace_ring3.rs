@@ -1,14 +1,15 @@
-//! Интеграционный тест M5c3: пользовательский ELF запускается как **планируемая задача**
-//! в своём адресном пространстве и вытесняется планировщиком наравне с потоками ядра.
+//! Интеграционный тест M5c3: **несколько** пользовательских процессов запускаются как
+//! планируемые задачи, каждый в своём адресном пространстве, и вытесняются планировщиком
+//! наравне с потоками ядра.
 //!
-//! `main` поднимает пейджинг/кучу, заводит планировщик и спавнит процесс из встроенного
-//! ELF (`user/hello`), затем включает вытеснение и крутится на «нулевом» потоке, пока
-//! процесс не отработает: таймер переключает на него (со сменой `CR3` и rsp0), он печатает
-//! строку через `write` и завершается `exit` (планировщик помечает его мёртвым и
-//! возвращается к «нулевому» потоку). Тест сверяет зафиксированное ядром.
+//! `main` поднимает пейджинг/кучу, заводит планировщик и спавнит ДВА процесса из встроенного
+//! ELF (`user/hello`), затем включает вытеснение и крутится на «нулевом» потоке, пока оба
+//! не отработают: таймер по очереди переключает на них (со сменой `CR3` и rsp0), каждый
+//! печатает строку через `write` и завершается `exit` (планировщик помечает его мёртвым и
+//! идёт дальше). Тест сверяет зафиксированное ядром.
 //!
 //! Почему это доказательство: без рабочих переключения `CR3`/rsp0, входа в кольцо 3 и
-//! завершения процесса был бы тройной сброс/зависание → таймаут. Плюс проверяем
+//! завершения процессов был бы тройной сброс/зависание → таймаут. Плюс проверяем
 //! **изоляцию**: пользовательский регион не виден в адресном пространстве ядра.
 
 #![no_std]
@@ -46,18 +47,22 @@ fn main(boot_info: &'static BootInfo) -> ! {
     let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
     heap::init_heap(&mut mapper, &mut frame_allocator).expect("heap init failed");
 
-    // Планировщик + пользовательский процесс как задача.
+    // Планировщик + ДВА пользовательских процесса как задачи (у каждого своё адресное
+    // пространство).
     thread::init();
-    // SAFETY: phys_mem_offset корректен, куча поднята; адреса процесса — в свободном у ядра слоте.
-    unsafe { spawn_user(HELLO_ELF, phys_mem_offset, &mut frame_allocator) };
+    // SAFETY: phys_mem_offset корректен, куча поднята; адреса процессов — в свободном у ядра
+    // слоте, у каждого в своём адресном пространстве.
+    for _ in 0..2 {
+        unsafe { spawn_user(HELLO_ELF, phys_mem_offset, &mut frame_allocator) };
+    }
     thread::start_preemption();
 
-    // Крутимся на «нулевом» потоке, пока процесс не отработает и не завершится. Вытеснение
-    // переключит на него и обратно; страховка-лимит ловит зависание.
+    // Крутимся на «нулевом» потоке, пока ОБА процесса не отработают и не завершатся.
+    // Вытеснение переключает между ними и обратно; страховка-лимит ловит зависание.
     let mut spins = 0u64;
-    while EXIT_CALLS.load(Ordering::SeqCst) == 0 {
+    while EXIT_CALLS.load(Ordering::SeqCst) < 2 {
         spins += 1;
-        assert!(spins < 5_000_000_000, "user process never ran/exited");
+        assert!(spins < 5_000_000_000, "user processes never ran/exited");
         core::hint::spin_loop();
     }
     thread::stop_preemption();
@@ -77,12 +82,12 @@ fn panic(info: &PanicInfo) -> ! {
     ferros::test_panic_handler(info)
 }
 
-/// Процесс отработал в кольце 3 как планируемая задача, завершился и изолирован от ядра.
+/// Два процесса отработали в кольце 3 как планируемые задачи, завершились и изолированы.
 #[test_case]
-fn user_process_scheduled_runs_and_exits() {
+fn user_processes_scheduled_run_and_exit() {
     use ferros::syscall::{LAST_EXIT_CODE, LAST_WRITE_FD, LAST_WRITE_LEN, LAST_WRITE_USER_RSP};
 
-    // (1) процесс сделал `write` в stdout (fd=1) с непустым буфером.
+    // (1) процесс(ы) сделали `write` в stdout (fd=1) с непустым буфером.
     assert_eq!(LAST_WRITE_FD.load(Ordering::SeqCst), 1, "write fd mismatch");
     assert!(
         LAST_WRITE_LEN.load(Ordering::SeqCst) > 0,
@@ -95,10 +100,11 @@ fn user_process_scheduled_runs_and_exits() {
         rsp > USER_STACK_VA && rsp <= top,
         "write did not run on the ring-3 user stack: rsp={rsp:#x} not in ({USER_STACK_VA:#x}, {top:#x}]"
     );
-    // (3) `exit` дошёл до ядра и завершил процесс (мы вернулись к «нулевому» потоку) с кодом 0.
-    assert!(
-        EXIT_CALLS.load(Ordering::SeqCst) >= 1,
-        "exit syscall never reached the kernel"
+    // (3) ОБА процесса завершились `exit` (мы вернулись к «нулевому» потоку) с кодом 0.
+    assert_eq!(
+        EXIT_CALLS.load(Ordering::SeqCst),
+        2,
+        "expected exactly two processes to exit"
     );
     assert_eq!(
         LAST_EXIT_CODE.load(Ordering::SeqCst),

@@ -1,10 +1,11 @@
 # ferros — Roadmap
 
 Each milestone is a complete, observable result ("it now does X") and ends with a
-merged PR. We detail a milestone only when we reach it. Current status: **M5 in
-progress** (M5a — ring 3; M5b — `write`/`exit`; M5c1 — real ELF; M5c2 — per-process
-address spaces; M5c3a — user processes as scheduled tasks (CR3+rsp0 on switch) — done;
-M0–M4 merged). **Next: M5c3b** (multiple processes; user fault kills the process; reaping).
+merged PR. We detail a milestone only when we reach it. Current status: **M5 done**
+(ring 3; Linux-shaped `write`/`exit`; real ELF loading; per-process address spaces;
+processes as scheduled tasks with preemption; multiple processes + a ring-3 fault kills
+the process, not the kernel; M0–M4 merged). **Next: M6** (storage + filesystem) —
+process reaping / polish still pending (needs a freeing frame allocator).
 
 > **North star (D8):** run the existing **Linux** software ecosystem rather than write a
 > native app ecosystem from scratch. Long-term aim is **ABI-level** compatibility

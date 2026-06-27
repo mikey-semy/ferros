@@ -22,9 +22,13 @@ use alloc::collections::BTreeSet;
 use x86_64::structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, Size4KiB};
 use x86_64::VirtAddr;
 
-/// Встроенная в образ ядра первая пользовательская программа (её ELF собирает `build.rs`
+/// Встроенная в образ ядра пользовательская программа «hello» (её ELF собирает `build.rs`
 /// из крейта `user/hello` и кладёт путь в `USER_HELLO_ELF`).
 pub static HELLO_ELF: &[u8] = include_bytes!(env!("USER_HELLO_ELF"));
+
+/// Встроенная программа-«фолтер» (M5c3b): намеренно падает в кольце 3 — для проверки, что
+/// ядро завершает процесс, а не падает само.
+pub static FAULTER_ELF: &[u8] = include_bytes!(env!("USER_FAULTER_ELF"));
 
 /// Почему ELF не удалось загрузить.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -114,27 +114,31 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     #[cfg(test)]
     test_main();
 
-    // M5c3: планировщик + первый пользовательский ПРОЦЕСС как планируемая задача.
-    // Заводим планировщик и спавним процесс из встроенного ELF: ему достаётся своё
-    // адресное пространство и свой стек ядра, а исполнится он в кольце 3, когда планировщик
-    // на него переключится. Рядом — фоновые потоки ядра A/B (M4e). Включаем вытеснение по
-    // таймеру: одно ядро честно делят пользовательский процесс (печатает строку через
-    // настоящий `write` и завершается `exit`), потоки A/B и executor на «нулевом» потоке.
+    // M5c3: планировщик + пользовательские ПРОЦЕССЫ как планируемые задачи. Спавним ДВА
+    // процесса из встроенного ELF — у каждого своё изолированное адресное пространство и
+    // свой стек ядра; каждый исполнится в кольце 3, когда планировщик на него переключится.
+    // Рядом — фоновые потоки ядра A/B (M4e). Включаем вытеснение: одно ядро честно делят
+    // два процесса (каждый печатает строку через `write` и завершается `exit`), потоки A/B
+    // и executor на «нулевом» потоке.
     thread::init();
-    // SAFETY: phys_mem_offset корректен, куча поднята; адреса сегментов/стека попадают в
-    // слот, свободный у ядра.
-    unsafe {
-        ferros::arch::x86_64::syscall::spawn_user(
-            ferros::syscall::elf::HELLO_ELF,
-            phys_mem_offset,
-            &mut frame_allocator,
-        )
-    };
+    // SAFETY: phys_mem_offset корректен, куча поднята; адреса процессов — в свободном у
+    // ядра слоте (у каждого — в своём адресном пространстве).
+    for _ in 0..2 {
+        unsafe {
+            ferros::arch::x86_64::syscall::spawn_user(
+                ferros::syscall::elf::HELLO_ELF,
+                phys_mem_offset,
+                &mut frame_allocator,
+            )
+        };
+    }
     thread::spawn(worker_a);
     thread::spawn(worker_b);
     thread::start_preemption();
 
-    println!("ferros ready. A user process + threads A/B run preemptively; type on the keyboard:");
+    println!(
+        "ferros ready. Two user processes + threads A/B run preemptively; type on the keyboard:"
+    );
 
     // M4b: эффективный экзекьютор — это и есть «жизнь» ядра после старта. Он гоняет
     // async-задачи, а когда делать нечего — спит на `hlt` (CPU не жжёт впустую). Теперь

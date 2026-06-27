@@ -14,6 +14,7 @@ use pic8259::ChainedPics;
 use spin::{LazyLock, Mutex};
 use x86_64::instructions::port::Port;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+use x86_64::PrivilegeLevel;
 
 /// Вектор, с которого начинается первый (master) PIC.
 pub const PIC_1_OFFSET: u8 = 32;
@@ -80,28 +81,49 @@ extern "x86-interrupt" fn double_fault_handler(
     panic!("EXCEPTION: DOUBLE FAULT\n{stack_frame:#?}");
 }
 
-/// Обработчик page fault. `CR2` хранит адрес, к которому шло обращение; код ошибки
-/// говорит, было ли это чтение/запись, из пользователя ли и т.п. В M5a (процессов ещё
-/// нет) это всегда баг ядра — паникуем. В M5c сбой пользователя будет завершать процесс,
-/// а не ядро.
+/// Обработчик page fault. `CR2` хранит адрес обращения; код ошибки говорит про чтение/
+/// запись, present/not и **из какого кольца** (`USER_MODE`). Сбой из **кольца 3** (M5c3b)
+/// завершает виновный процесс, а ядро продолжает работать; сбой из кольца 0 — баг ядра,
+/// паникуем.
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
     let addr = x86_64::registers::control::Cr2::read_raw();
+    if error_code.contains(PageFaultErrorCode::USER_MODE) {
+        kill_faulting_user_process("PAGE FAULT", addr, &stack_frame);
+    }
     panic!(
-        "EXCEPTION: PAGE FAULT\n  accessed: {addr:#x}\n  error: {error_code:?}\n{stack_frame:#?}"
+        "EXCEPTION: PAGE FAULT (kernel)\n  accessed: {addr:#x}\n  error: {error_code:?}\n{stack_frame:#?}"
     );
 }
 
-/// Обработчик general protection fault: нарушение защиты (например, недопустимый
-/// селектор или привилегированная инструкция из кольца 3). `error_code` — селектор-
-/// виновник (или 0). Паникуем с диагностикой.
+/// Обработчик general protection fault: нарушение защиты (недопустимый селектор,
+/// привилегированная инструкция из кольца 3 и т.п.). Из кольца 3 — завершаем процесс; из
+/// кольца 0 — паникуем. Кольцо определяем по RPL селектора кода в кадре прерывания.
 extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    panic!("EXCEPTION: GENERAL PROTECTION FAULT (code {error_code:#x})\n{stack_frame:#?}");
+    if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3 {
+        kill_faulting_user_process("GENERAL PROTECTION FAULT", error_code, &stack_frame);
+    }
+    panic!("EXCEPTION: GENERAL PROTECTION FAULT (kernel, code {error_code:#x})\n{stack_frame:#?}");
+}
+
+/// Завершает текущий (вызвавший сбой) пользовательский процесс: печатает диагностику в
+/// serial, отмечает сбой в счётчике и уходит в планировщик (не возвращается). Ядро при
+/// этом не падает — продолжают работать остальные задачи.
+///
+/// Покрывает сбой, взятый в коде кольца 3. Сбой, который ЯДРО берёт на пользовательском
+/// указателе внутри syscall (uaccess по неотображённому адресу), сюда не попадает — он из
+/// кольца 0 и пока паникует ядро; отказоустойчивый uaccess (extable) — в HARDENING.md.
+fn kill_faulting_user_process(what: &str, detail: u64, stack_frame: &InterruptStackFrame) -> ! {
+    crate::serial_println!(
+        "[user] ring-3 {what} (detail {detail:#x}) — killing process\n{stack_frame:#?}"
+    );
+    crate::syscall::USER_FAULT_KILLS.fetch_add(1, Ordering::SeqCst);
+    crate::sched::thread::exit_current();
 }
 
 /// Счётчик тиков таймера (PIT, ~18.2 Гц). Растёт на каждом прерывании; основа отсчёта
