@@ -54,6 +54,15 @@ pub fn process_count() -> usize {
     PROCESSES.lock().len()
 }
 
+/// Переносит таблицу дескрипторов с ключа `old_cr3` на `new_cr3` — для `execve` (M6f2):
+/// дескрипторы переживают exec, но ключом служит CR3, а он при exec меняется.
+pub fn rekey_process(old_cr3: u64, new_cr3: u64) {
+    let mut procs = PROCESSES.lock();
+    if let Some(table) = procs.remove(&old_cr3) {
+        procs.insert(new_cr3, table);
+    }
+}
+
 /// Ключ текущего процесса — физ. адрес его корня таблиц страниц.
 fn current_key() -> u64 {
     crate::arch::context::current_address_space()

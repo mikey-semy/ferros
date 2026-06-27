@@ -31,6 +31,11 @@ path = "src/reader.rs"
 name = "getpidtest"
 path = "src/getpidtest.rs"
 
+# Проверка execve (M6f2): заменяет себя программой HELLO с диска.
+[[bin]]
+name = "exectest"
+path = "src/exectest.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"

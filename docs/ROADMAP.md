@@ -61,8 +61,8 @@ pending (needs a freeing frame allocator), a planned pre-M7 consolidation.
     **M6e1 — freeing frame allocator** (done; free-list + `deallocate_frame`), **M6e2 —
     address-space teardown**, **M6e3 — process reaping**.
   - **M6f — Process model** (in progress). PIDs + fork/exec/wait + basic signals. Stages:
-    **M6f1 — process table (PIDs + `getpid`)** (done), M6f2 `execve`, M6f3 `fork`, M6f4 `wait`,
-    M6f5 signals.
+    **M6f1 — process table (PIDs + `getpid`)** (done), **M6f2 — `execve`** (done; loads from the
+    FAT disk), M6f3 `fork`, M6f4 `wait`, M6f5 signals.
   - Then **filesystem** breadth (write + subdirectories + a real VFS).
 - **M7 — Shell.** init process, interactive shell, basic utilities, line editing.
 

@@ -22,6 +22,7 @@ fn main() {
         "src/faulter.rs",
         "src/reader.rs",
         "src/getpidtest.rs",
+        "src/exectest.rs",
         "Cargo.toml",
         "Cargo.lock",
         "linker.ld",
@@ -38,6 +39,7 @@ fn main() {
         ("faulter", "USER_FAULTER_ELF"),
         ("reader", "USER_READER_ELF"),
         ("getpidtest", "USER_GETPIDTEST_ELF"),
+        ("exectest", "USER_EXECTEST_ELF"),
     ];
 
     // Удаляем прошлые ELF перед сборкой: cargo не отслеживает linker.ld / target.json как
@@ -99,13 +101,17 @@ fn main() {
 const FAT_TEST_FILE: &str = "HELLO.TXT";
 const FAT_TEST_CONTENT: &[u8] = b"ferros M6c: hello from FAT32!\n";
 
-/// Создаёт тестовый образ диска (M6c): форматирует его как **FAT32** и кладёт один файл.
-/// Образ — `target/ferros-disk.img` (путь относительно корня воркспейса, где QEMU и
-/// запускается; `target/` в .gitignore). QEMU подключает его как virtio-blk; ядро читает FAT
-/// своим кодом. `fatfs` — только build-зависимость (хост-инструмент создания фикстуры).
+/// Версия содержимого образа (пишется в BS_VolID при форматировании). Бамп при изменении
+/// набора файлов/содержимого → образ пересоздаётся, хотя размер прежний.
+const DISK_VERSION: u32 = 2;
+
+/// Создаёт тестовый образ диска (M6c/M6f2): форматирует его как **FAT32** и кладёт тестовый
+/// файл плюс пользовательские ELF-программы (для `execve` по пути — M6f2). Образ —
+/// `target/ferros-disk.img` (относительно корня воркспейса, где запускается QEMU; `target/`
+/// в .gitignore). `fatfs` — только build-зависимость (хост-инструмент создания фикстуры).
 ///
-/// Размер 64 МиБ: FAT32 требует ≥65525 кластеров, в 4 МиБ не помещается. Идемпотентно: не
-/// переписываем, если образ уже нужного размера и это FAT (сигнатура загрузсектора 0x55AA).
+/// Идемпотентно: не переписываем, если образ уже нужного размера, это FAT (сигнатура 0x55AA)
+/// и его BS_VolID == `DISK_VERSION`.
 fn generate_disk_image(manifest: &str) {
     use std::io::Write;
     const DISK_SIZE: u64 = 64 * 1024 * 1024; // 64 МиБ — хватает на FAT32
@@ -113,36 +119,51 @@ fn generate_disk_image(manifest: &str) {
     let disk = PathBuf::from(manifest)
         .join("target")
         .join("ferros-disk.img");
-    if disk_image_is_fat(&disk, DISK_SIZE) {
+    if disk_image_is_current(&disk, DISK_SIZE) {
         return;
     }
 
     let mut image = vec![0u8; DISK_SIZE as usize];
 
     // Форматируем буфер как FAT32. В fatfs 0.3 с фичей `std` его трейты реализованы для
-    // std::io-типов (`Cursor` подходит напрямую, обёртка не нужна).
+    // std::io-типов (`Cursor` подходит напрямую, обёртка не нужна). `volume_id` несёт версию.
     {
         let cursor = std::io::Cursor::new(&mut image);
         fatfs::format_volume(
             cursor,
             fatfs::FormatVolumeOptions::new()
                 .fat_type(fatfs::FatType::Fat32)
-                .bytes_per_sector(512),
+                .bytes_per_sector(512)
+                .volume_id(DISK_VERSION),
         )
         .expect("failed to format FAT32 image");
     }
-    // Монтируем и кладём тестовый файл (Drop у FileSystem сбрасывает изменения в буфер).
+    // Монтируем и кладём файлы (Drop у FileSystem сбрасывает изменения в буфер).
     {
         let cursor = std::io::Cursor::new(&mut image);
         let fs = fatfs::FileSystem::new(cursor, fatfs::FsOptions::new())
             .expect("failed to mount FAT32 image");
-        let mut file = fs
-            .root_dir()
+        let root = fs.root_dir();
+
+        let mut file = root
             .create_file(FAT_TEST_FILE)
             .expect("failed to create test file");
         file.write_all(FAT_TEST_CONTENT)
             .expect("failed to write test file");
         file.flush().expect("failed to flush test file");
+        drop(file);
+
+        // Программа `hello` на диске под `execve` (имя 8.3 `HELLO`). Когда понадобится больше
+        // программ — вынести в список.
+        let hello_elf = PathBuf::from(manifest).join("user/hello/target/x86_64-user/release/hello");
+        let hello_bytes = std::fs::read(&hello_elf)
+            .unwrap_or_else(|e| panic!("read {} for disk image: {e}", hello_elf.display()));
+        let mut prog = root
+            .create_file("HELLO")
+            .expect("create HELLO on disk image");
+        prog.write_all(&hello_bytes)
+            .expect("write HELLO on disk image");
+        prog.flush().expect("flush HELLO on disk image");
     }
 
     if let Some(parent) = disk.parent() {
@@ -151,8 +172,9 @@ fn generate_disk_image(manifest: &str) {
     std::fs::write(&disk, &image).expect("failed to write ferros-disk.img");
 }
 
-/// Уже ли на месте FAT-образ нужного размера (по сигнатуре загрузочного сектора 0x55AA).
-fn disk_image_is_fat(path: &std::path::Path, size: u64) -> bool {
+/// Уже ли на месте актуальный FAT-образ: нужного размера, с сигнатурой загрузсектора 0x55AA
+/// и BS_VolID == [`DISK_VERSION`] (FAT32 хранит VolID по смещению 0x43).
+fn disk_image_is_current(path: &std::path::Path, size: u64) -> bool {
     use std::io::Read;
     let Ok(mut file) = std::fs::File::open(path) else {
         return false;
@@ -162,5 +184,9 @@ fn disk_image_is_fat(path: &std::path::Path, size: u64) -> bool {
         _ => return false,
     }
     let mut boot = [0u8; 512];
-    file.read_exact(&mut boot).is_ok() && boot[510] == 0x55 && boot[511] == 0xAA
+    if file.read_exact(&mut boot).is_err() || boot[510] != 0x55 || boot[511] != 0xAA {
+        return false;
+    }
+    let vol_id = u32::from_le_bytes([boot[0x43], boot[0x44], boot[0x45], boot[0x46]]);
+    vol_id == DISK_VERSION
 }
