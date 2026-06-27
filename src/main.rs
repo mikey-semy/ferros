@@ -150,6 +150,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
             ferros::arch::x86_64::syscall::spawn_user(elf, phys_mem_offset, &mut frame_allocator)
         };
     }
+    // M6e3: передаём фрейм-аллокатор в глобальное владение — теперь reaper (в главном цикле)
+    // сможет освобождать память завершённых процессов. Это последнее использование локального
+    // аллокатора; дальше — только через глобальный.
+    ferros::mm::frame::install(frame_allocator);
+
     thread::spawn(worker_a);
     thread::spawn(worker_b);
     thread::start_preemption();

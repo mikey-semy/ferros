@@ -42,6 +42,18 @@ struct OpenFile {
 /// Реестр таблиц дескрипторов по процессам: ключ — физический адрес PML4 (CR3) процесса.
 static PROCESSES: Mutex<BTreeMap<u64, Vec<Option<OpenFile>>>> = Mutex::new(BTreeMap::new());
 
+/// Забывает таблицу дескрипторов завершённого процесса (по физ. адресу его PML4). Зовёт
+/// reaper (M6e3) при освобождении процесса. Теперь это не просто уборка, а **корректность**:
+/// фрейм PML4 переиспользуется (M6e1), и новый процесс не должен унаследовать чужие fd.
+pub fn forget_process(cr3_phys: u64) {
+    PROCESSES.lock().remove(&cr3_phys);
+}
+
+/// (Диагностика/тесты) Сколько процессов сейчас имеют таблицу дескрипторов.
+pub fn process_count() -> usize {
+    PROCESSES.lock().len()
+}
+
 /// Ключ текущего процесса — физ. адрес его корня таблиц страниц.
 fn current_key() -> u64 {
     crate::arch::context::current_address_space()

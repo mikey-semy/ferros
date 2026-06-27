@@ -25,10 +25,32 @@
 //! отсутствие коалесинга/буддиси — это в HARDENING.md.
 
 use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
+use spin::Mutex;
 use x86_64::{
     structures::paging::{FrameAllocator, FrameDeallocator, PhysFrame, Size4KiB},
     PhysAddr,
 };
+
+/// Глобальный фрейм-аллокатор (M6e3): чтобы reaper — и будущие `fork`/`exec` — могли
+/// выделять/освобождать фреймы из любого контекста (например, из главного цикла ядра, где
+/// локальной переменной-аллокатора нет). Устанавливается [`install`] один раз ПОСЛЕ
+/// boot-аллокаций (загрузка их делает локальным аллокатором, потом передаёт его сюда).
+static FRAME_ALLOC: Mutex<Option<BootInfoFrameAllocator>> = Mutex::new(None);
+
+/// Передаёт аллокатор в глобальное владение (вызвать один раз после boot-аллокаций).
+pub fn install(allocator: BootInfoFrameAllocator) {
+    *FRAME_ALLOC.lock() = Some(allocator);
+}
+
+/// Установлен ли глобальный аллокатор.
+pub fn global_installed() -> bool {
+    FRAME_ALLOC.lock().is_some()
+}
+
+/// Выполняет `f` с глобальным аллокатором; `None`, если он ещё не установлен.
+pub fn with_global<R>(f: impl FnOnce(&mut BootInfoFrameAllocator) -> R) -> Option<R> {
+    FRAME_ALLOC.lock().as_mut().map(f)
+}
 
 /// Сентинел «конца списка» свободных фреймов: физический адрес 0 не бывает usable-фреймом
 /// (нижняя память зарезервирована), поэтому 0 в поле-ссылке означает «дальше пусто».
