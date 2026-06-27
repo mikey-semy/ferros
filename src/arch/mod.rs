@@ -20,6 +20,11 @@ pub use self::x86_64::context;
 #[cfg(target_arch = "x86_64")]
 pub use self::x86_64::USER_SPACE_END;
 
+// Арх-нейтральный доступ к конфигурационному пространству PCI (M6a): переносимый драйвер
+// PCI ([`crate::drivers::pci`]) обходит шину через этот шов, не зная механики портов.
+#[cfg(target_arch = "x86_64")]
+pub use self::x86_64::pci;
+
 /// Инициализация процессора под текущую целевую архитектуру (роутинг по `cfg`).
 #[cfg(target_arch = "x86_64")]
 pub fn init() {

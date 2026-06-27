@@ -39,8 +39,15 @@ process reaping / polish still pending (needs a freeing frame allocator).
 
 - **M5 — Userspace + syscalls.** Ring 3, `syscall` instruction, per-process address
   spaces, ELF loading, first user program.
-- **M6 — Storage + filesystem.** Disk driver (virtio-blk / AHCI), filesystem
-  (start with FAT32 read), VFS layer.
+- **M6 — Storage + filesystem.** Disk driver (**virtio-blk**, chosen over ATA/AHCI),
+  filesystem (**hand-rolled FAT read**), VFS layer. Decomposed:
+  - **M6a — Minimal PCI bus enumeration** (done). virtio is a PCI device, so the PCI
+    config-space scan (ports 0xCF8/0xCFC) is the prerequisite foundation: find the
+    virtio-blk device, decode its BARs.
+  - **M6b — Legacy virtio-blk driver:** bus-master + one virtqueue, read sectors.
+  - **M6c — Hand-rolled FAT read:** BPB → FAT → root dir → cluster chain → file bytes.
+  - **M6d — VFS + file syscalls:** `open`/`read`/`close`/`lseek`, per-process fd table;
+    a user program reads a file from disk.
 - **M7 — Shell.** init process, interactive shell, basic utilities, line editing.
 
 ## Tier D — A "real" OS
