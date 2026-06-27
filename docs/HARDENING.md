@@ -112,10 +112,14 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   with IF=0 (non-preemptible, non-reentrant), but a blocking/yielding syscall or SMP needs a
   per-task syscall stack (the per-task kernel stack / rsp0 already exists for ring-3
   interrupts).
-- **User-fault termination is coarse (M5c3b).** A ring-3 #PF/#GP now kills *the process*
-  (not the kernel) via `exit_current`, but there's no signal delivery (`SIGSEGV`), no
-  faulting-instruction reporting to a parent, and no core-dump — just terminate + a serial
-  line. Real fault handling (signals, `wait`-able exit status) comes with a process model.
+- **User-fault termination is coarse, and only covers ring-3 *code* faults (M5c3b).** A
+  #PF/#GP taken while executing in ring 3 now kills *the process* (not the kernel) via
+  `exit_current`, but: (a) no signal delivery (`SIGSEGV`), faulting-instruction reporting,
+  or core dump — just terminate + a serial line; and (b) a fault the **kernel** takes on a
+  user pointer inside a syscall (uaccess to a valid-range-but-unmapped address) is a ring-0
+  fault → still panics the kernel (the uaccess/extable item above). So a user can still DoS
+  the kernel via e.g. `write(1, unmapped_user_ptr, n)` until uaccess is fault-tolerant.
+  Both need the extable + a real process/signal model.
 - **Scheduler now carries an arch `PhysFrame` (CR3).** `sched::thread::Thread` holds
   `Option<PhysFrame>` and the switch goes through `arch::context::switch_task`; the data type
   leaks x86_64 into the portable scheduler. A neutral "address-space handle" is a later seam.

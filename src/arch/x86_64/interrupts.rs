@@ -112,9 +112,13 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 }
 
 /// Завершает текущий (вызвавший сбой) пользовательский процесс: печатает диагностику в
-/// serial, отмечает сбой в счётчике и уходит в планировщик (`exit_current` не возвращается).
-/// Ядро при этом не падает — продолжают работать остальные задачи.
-fn kill_faulting_user_process(what: &str, detail: u64, stack_frame: &InterruptStackFrame) {
+/// serial, отмечает сбой в счётчике и уходит в планировщик (не возвращается). Ядро при
+/// этом не падает — продолжают работать остальные задачи.
+///
+/// Покрывает сбой, взятый в коде кольца 3. Сбой, который ЯДРО берёт на пользовательском
+/// указателе внутри syscall (uaccess по неотображённому адресу), сюда не попадает — он из
+/// кольца 0 и пока паникует ядро; отказоустойчивый uaccess (extable) — в HARDENING.md.
+fn kill_faulting_user_process(what: &str, detail: u64, stack_frame: &InterruptStackFrame) -> ! {
     crate::serial_println!(
         "[user] ring-3 {what} (detail {detail:#x}) — killing process\n{stack_frame:#?}"
     );

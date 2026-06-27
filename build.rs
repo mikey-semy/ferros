@@ -29,12 +29,16 @@ fn main() {
         println!("cargo:rerun-if-changed={user_dir}/{f}");
     }
 
+    // Бинари пользовательского крейта и переменные окружения, под которыми ядро их
+    // встраивает. Единый список — чтобы удаление и проброс путей не разъезжались.
+    let binaries = [("hello", "USER_HELLO_ELF"), ("faulter", "USER_FAULTER_ELF")];
+
     // Удаляем прошлые ELF перед сборкой: cargo не отслеживает linker.ld / target.json как
     // входы, поэтому при их изменении сам бы не перелинковал. Удаление принуждает к
     // (быстрой) перелинковке, подхватывающей текущий скрипт/таргет. .o-файлы кэшируются,
     // так что core/alloc не пересобираются.
     let out_dir = format!("{user_dir}/target/x86_64-user/release");
-    for bin in ["hello", "faulter"] {
+    for (bin, _) in binaries {
         let _ = std::fs::remove_file(format!("{out_dir}/{bin}"));
     }
 
@@ -68,7 +72,7 @@ fn main() {
     // префикса \\?\, который даёт canonicalize на Windows). Отдаём каждый ядру через
     // переменную окружения для `include_bytes!`.
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-    for (bin, env) in [("hello", "USER_HELLO_ELF"), ("faulter", "USER_FAULTER_ELF")] {
+    for (bin, env) in binaries {
         let elf = PathBuf::from(&manifest)
             .join(user_dir)
             .join(format!("target/x86_64-user/release/{bin}"));
