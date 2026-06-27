@@ -126,6 +126,8 @@ fn disk_image_current(path: &std::path::Path, size: u64, signature: &[u8]) -> bo
         Ok(meta) if meta.len() == size => {}
         _ => return false,
     }
-    let mut head = [0u8; 8];
-    file.read_exact(&mut head).is_ok() && head.starts_with(signature)
+    // Читаем ровно длину сигнатуры (не фиксированный буфер) — чтобы проверка не разъехалась,
+    // если сигнатуру когда-нибудь изменят по длине.
+    let mut head = vec![0u8; signature.len()];
+    file.read_exact(&mut head).is_ok() && head == signature
 }
