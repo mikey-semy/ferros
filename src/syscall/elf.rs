@@ -30,6 +30,10 @@ pub static HELLO_ELF: &[u8] = include_bytes!(env!("USER_HELLO_ELF"));
 /// ядро завершает процесс, а не падает само.
 pub static FAULTER_ELF: &[u8] = include_bytes!(env!("USER_FAULTER_ELF"));
 
+/// Встроенная программа-«читатель» (M6d2): открывает и читает файл с диска через файловые
+/// системные вызовы.
+pub static READER_ELF: &[u8] = include_bytes!(env!("USER_READER_ELF"));
+
 /// Почему ELF не удалось загрузить.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfError {

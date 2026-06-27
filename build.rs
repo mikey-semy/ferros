@@ -20,6 +20,7 @@ fn main() {
     for f in [
         "src/main.rs",
         "src/faulter.rs",
+        "src/reader.rs",
         "Cargo.toml",
         "Cargo.lock",
         "linker.ld",
@@ -31,7 +32,11 @@ fn main() {
 
     // Бинари пользовательского крейта и переменные окружения, под которыми ядро их
     // встраивает. Единый список — чтобы удаление и проброс путей не разъезжались.
-    let binaries = [("hello", "USER_HELLO_ELF"), ("faulter", "USER_FAULTER_ELF")];
+    let binaries = [
+        ("hello", "USER_HELLO_ELF"),
+        ("faulter", "USER_FAULTER_ELF"),
+        ("reader", "USER_READER_ELF"),
+    ];
 
     // Удаляем прошлые ELF перед сборкой: cargo не отслеживает linker.ld / target.json как
     // входы, поэтому при их изменении сам бы не перелинковал. Удаление принуждает к
