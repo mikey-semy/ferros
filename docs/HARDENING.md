@@ -102,10 +102,9 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   faulting RIP) is the SMP/perf upgrade, still deferred. Also `write` content capture
   (`LAST_WRITE_*`) is test observability in the production path — drop it once there's a
   better test hook.
-- **No address-space teardown (M5c2).** `AddressSpace::new_sharing_kernel` allocates a PML4
-  frame, and the process's user page-table subtree + page frames are never freed (the frame
-  allocator never frees anyway — M3 item). Fine for the one-shot program; real process exit
-  must reclaim them.
+- ~~**No address-space teardown (M5c2).**~~ **Addressed (M6e2):** `AddressSpace::destroy`
+  frees the process's private (user) subtree + its PML4 via the freeing allocator, leaving the
+  shared kernel entries intact. (Hooking it into process exit is the reaper, M6e3.)
 - **User space confined to one L4 slot via a hand-picked high address (M5c2).** Because
   bootloader 0.9 loads the kernel in the lower half, the user ELF/stack are hard-pinned to
   L4 slot 255 (`0x7F80…`, built with `code-model=large`) to guarantee a kernel-free slot.
