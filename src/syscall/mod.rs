@@ -58,12 +58,14 @@ pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
         abi::SYS_READ => files::sys_read(args[0], args[1], args[2]),
         abi::SYS_CLOSE => files::sys_close(args[0]),
         abi::SYS_LSEEK => files::sys_lseek(args[0], args[1] as i64, args[2]),
+        abi::SYS_GETPID => crate::sched::thread::current_pid() as i64,
         abi::SYS_EXIT | abi::SYS_EXIT_GROUP => {
-            LAST_EXIT_CODE.store(args[0] as i64, Ordering::SeqCst);
+            let status = args[0] as i32;
+            LAST_EXIT_CODE.store(status as i64, Ordering::SeqCst);
             EXIT_CALLS.fetch_add(1, Ordering::SeqCst);
-            // Завершаем текущий поток: планировщик пометит его мёртвым и уйдёт на другой.
-            // Не возвращается — поэтому в `rax` ничего не кладётся и `sysret` не случится.
-            crate::sched::thread::exit_current();
+            // Завершаем текущий поток (с кодом возврата): планировщик пометит его мёртвым и
+            // уйдёт на другой. Не возвращается — в `rax` ничего не кладётся, `sysret` не будет.
+            crate::sched::thread::exit_current(status);
         }
         // Неизвестный номер — как в Linux: -ENOSYS.
         _ => -abi::ENOSYS,

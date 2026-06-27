@@ -26,6 +26,11 @@ path = "src/faulter.rs"
 name = "reader"
 path = "src/reader.rs"
 
+# Проверка getpid (M6f1): завершается со своим PID как кодом возврата.
+[[bin]]
+name = "getpidtest"
+path = "src/getpidtest.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"
