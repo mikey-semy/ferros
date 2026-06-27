@@ -60,6 +60,42 @@ impl BootInfoFrameAllocator {
         let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
         frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
     }
+
+    /// Выделяет серию из `count` **физически идущих подряд** фреймов и возвращает первый.
+    /// Нужно для DMA: virtqueue устройства virtio (M6b) должна лежать в непрерывной
+    /// физической памяти и адресуется одним «номером страницы» (PFN = phys >> 12).
+    ///
+    /// Ищем первую серию из `count` соседних фреймов (адрес каждого = предыдущий + 4 КиБ)
+    /// начиная с курсора. Фреймы до начала серии (если упёрлись в границу `Usable`-региона)
+    /// пропускаются — они и так никогда не освобождаются (M3). `None`, если серии нет.
+    pub fn allocate_contiguous(&mut self, count: usize) -> Option<PhysFrame> {
+        if count == 0 {
+            return None;
+        }
+        let mut run_start: Option<PhysFrame> = None;
+        let mut run_offset = 0usize;
+        let mut run_len = 0usize;
+        let mut prev: Option<PhysFrame> = None;
+        for (offset, frame) in self.usable_frames().skip(self.next).enumerate() {
+            let contiguous = prev.is_some_and(|p| {
+                frame.start_address().as_u64() == p.start_address().as_u64() + 4096
+            });
+            if contiguous {
+                run_len += 1;
+            } else {
+                run_start = Some(frame);
+                run_offset = offset;
+                run_len = 1;
+            }
+            if run_len == count {
+                // Серия [run_offset, run_offset+count) от курсора занята целиком.
+                self.next += run_offset + count;
+                return run_start;
+            }
+            prev = Some(frame);
+        }
+        None
+    }
 }
 
 // SAFETY: `usable_frames` берёт фреймы только из `Usable`-регионов карты памяти, а

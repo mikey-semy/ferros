@@ -25,6 +25,11 @@ pub use self::x86_64::USER_SPACE_END;
 #[cfg(target_arch = "x86_64")]
 pub use self::x86_64::pci;
 
+// Арх-нейтральный ввод-вывод по портам с динамическим номером (M6b): драйверы устройств
+// с I/O-BAR (legacy virtio) читают/пишут регистры через этот шов.
+#[cfg(target_arch = "x86_64")]
+pub use self::x86_64::io;
+
 /// Инициализация процессора под текущую целевую архитектуру (роутинг по `cfg`).
 #[cfg(target_arch = "x86_64")]
 pub fn init() {

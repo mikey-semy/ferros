@@ -21,7 +21,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
-use ferros::drivers::{keyboard, pci};
+use ferros::drivers::{keyboard, pci, virtio_blk};
 use ferros::mm::frame::BootInfoFrameAllocator;
 use ferros::sched::executor::Executor;
 use ferros::sched::{thread, Task};
@@ -94,6 +94,16 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // M6a: перечисляем шину PCI и печатаем устройства в serial (нужна куча — список в Vec).
     // Видно хост-мост i440fx и подключённый диск virtio-blk — фундамент для M6b.
     pci::init();
+
+    // M6b: поднимаем драйвер диска virtio-blk и для наглядности читаем сектор 0 — там
+    // должна быть сигнатура `FERROSM6`, которую записал build.rs в образ диска.
+    if virtio_blk::init(phys_mem_offset, &mut frame_allocator) {
+        let mut sector = [0u8; virtio_blk::SECTOR_SIZE];
+        match virtio_blk::read_sector(0, &mut sector) {
+            Ok(()) => serial_println!("[virtio-blk] sector 0 starts with: {:?}", &sector[..8]),
+            Err(e) => serial_println!("[virtio-blk] read failed: {e:?}"),
+        }
+    }
 
     // Динамические аллокации поверх кучи: Box (одно значение) и Vec (растущий массив).
     let boxed = Box::new(42);
