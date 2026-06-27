@@ -164,9 +164,26 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
 - **virtio device assumptions (M6a).** The test pins the *transitional legacy* virtio-blk id
   `1af4:1001` with a port-I/O BAR0; a modern-only device (`disable-legacy=on`, id `1af4:1042`,
   MMIO BARs) would need the modern capability-based path. Single virtio-blk device assumed.
-- **Disk image is a build artifact, not a fixture (M6a).** `build.rs` generates a 4 MiB raw
-  `target/ferros-disk.img` with a known signature; it's regenerated on size/signature
-  mismatch only. M6c will format it as FAT (likely via a host-side `fatfs` build-dependency).
+- **Disk image is a build artifact, not a fixture (M6a/M6c).** `build.rs` generates
+  `target/ferros-disk.img` (64 MiB, FAT32-formatted via the `fatfs` build-dependency) and is
+  regenerated only when the size/boot-signature don't match — so editing the embedded test
+  file's content without changing the image size won't auto-regenerate (delete the image to
+  force it). The test file's name/content are duplicated between `build.rs` and
+  `tests/fat_read.rs` (separate crates can't share a const).
+- **FAT reader is read-only, FAT32-only, root-dir-only, 8.3-only (M6c).** `fs::fat` reads;
+  there's no write/create/delete. It only handles FAT32 (rejects FAT12/16), assumes 512-byte
+  sectors, finds files only in the **root** directory (no path parsing / subdirectory
+  traversal, though `find_in_dir` is cluster-generic), matches only short **8.3** names (LFN
+  entries are skipped, not assembled), and reads a whole file into a `Vec` (no seek/streaming,
+  no partial reads). It also re-reads the BPB on every `mount()` and re-reads FAT/dir sectors
+  per call with **no caching** — O(sectors) per lookup. A real VFS + a buffer cache + LFN +
+  subdirectories + write come later.
+- **FAT reader trusts a well-formed image (M6c).** It now bounds cluster numbers to the
+  volume (`valid_cluster`, prevents sector-address overflow / wild reads) and caps chain
+  traversal (prevents a cyclic-chain hang), but it still **trusts the directory's file size**:
+  if the cluster chain is shorter than `size`, `read_file` returns a silently *truncated*
+  buffer rather than an error. Like the ELF loader (D10), this is defensive-but-not-complete;
+  a fuller reader would cross-check size vs chain length and surface mismatches.
 - **virtio-blk is polled, single-request, read-only (M6b).** The driver suppresses the
   device interrupt (`VIRTQ_AVAIL_F_NO_INTERRUPT`) and busy-polls the used ring — no IRQ
   handler, so a `read_sector` blocks the caller (and, under the global `DEVICE` Mutex,

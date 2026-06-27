@@ -95,13 +95,19 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Видно хост-мост i440fx и подключённый диск virtio-blk — фундамент для M6b.
     pci::init();
 
-    // M6b: поднимаем драйвер диска virtio-blk и для наглядности читаем сектор 0 — там
-    // должна быть сигнатура `FERROSM6`, которую записал build.rs в образ диска.
+    // M6b/M6c: поднимаем драйвер диска virtio-blk; если получилось — монтируем FAT32 и для
+    // наглядности читаем тестовый файл (его положил build.rs при форматировании образа).
     if virtio_blk::init(phys_mem_offset, &mut frame_allocator) {
-        let mut sector = [0u8; virtio_blk::SECTOR_SIZE];
-        match virtio_blk::read_sector(0, &mut sector) {
-            Ok(()) => serial_println!("[virtio-blk] sector 0 starts with: {:?}", &sector[..8]),
-            Err(e) => serial_println!("[virtio-blk] read failed: {e:?}"),
+        match ferros::fs::fat::Fat32::mount() {
+            Ok(fs) => match fs.read_file("HELLO.TXT") {
+                Ok(data) => serial_println!(
+                    "[fat] HELLO.TXT ({} bytes): {:?}",
+                    data.len(),
+                    core::str::from_utf8(&data).unwrap_or("<non-utf8>")
+                ),
+                Err(e) => serial_println!("[fat] read_file failed: {e:?}"),
+            },
+            Err(e) => serial_println!("[fat] mount failed: {e:?}"),
         }
     }
 

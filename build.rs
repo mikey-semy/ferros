@@ -87,27 +87,55 @@ fn main() {
     generate_disk_image(&manifest);
 }
 
-/// Создаёт raw-образ диска для virtio-blk (M6a): тесту перечисления PCI нужно подключённое
-/// устройство, а M6b прочитает сектор 0 и сверит сигнатуру. Образ — `target/ferros-disk.img`
-/// (путь относительно корня воркспейса, где QEMU и запускается; `target/` в .gitignore).
+/// Имя и содержимое тестового файла в образе. ВАЖНО: те же значения захардкожены в
+/// `tests/fat_read.rs` (отдельный крейт — общую константу не пошарить); менять оба места.
+const FAT_TEST_FILE: &str = "HELLO.TXT";
+const FAT_TEST_CONTENT: &[u8] = b"ferros M6c: hello from FAT32!\n";
+
+/// Создаёт тестовый образ диска (M6c): форматирует его как **FAT32** и кладёт один файл.
+/// Образ — `target/ferros-disk.img` (путь относительно корня воркспейса, где QEMU и
+/// запускается; `target/` в .gitignore). QEMU подключает его как virtio-blk; ядро читает FAT
+/// своим кодом. `fatfs` — только build-зависимость (хост-инструмент создания фикстуры).
 ///
-/// Идемпотентно: не переписываем, если образ уже нужного размера и с нашей сигнатурой.
+/// Размер 64 МиБ: FAT32 требует ≥65525 кластеров, в 4 МиБ не помещается. Идемпотентно: не
+/// переписываем, если образ уже нужного размера и это FAT (сигнатура загрузсектора 0x55AA).
 fn generate_disk_image(manifest: &str) {
-    const DISK_SIZE: u64 = 4 * 1024 * 1024; // 4 МиБ
-    const SIGNATURE: &[u8] = b"FERROSM6"; // 8 байт в начале сектора 0
+    use std::io::Write;
+    const DISK_SIZE: u64 = 64 * 1024 * 1024; // 64 МиБ — хватает на FAT32
 
     let disk = PathBuf::from(manifest)
         .join("target")
         .join("ferros-disk.img");
-    if disk_image_current(&disk, DISK_SIZE, SIGNATURE) {
+    if disk_image_is_fat(&disk, DISK_SIZE) {
         return;
     }
 
     let mut image = vec![0u8; DISK_SIZE as usize];
-    image[..SIGNATURE.len()].copy_from_slice(SIGNATURE);
-    // Заметный паттерн в остатке сектора 0 — чтобы M6b проверял не только сигнатуру.
-    for (i, byte) in image[SIGNATURE.len()..512].iter_mut().enumerate() {
-        *byte = (i as u8).wrapping_mul(3).wrapping_add(1);
+
+    // Форматируем буфер как FAT32. В fatfs 0.3 с фичей `std` его трейты реализованы для
+    // std::io-типов (`Cursor` подходит напрямую, обёртка не нужна).
+    {
+        let cursor = std::io::Cursor::new(&mut image);
+        fatfs::format_volume(
+            cursor,
+            fatfs::FormatVolumeOptions::new()
+                .fat_type(fatfs::FatType::Fat32)
+                .bytes_per_sector(512),
+        )
+        .expect("failed to format FAT32 image");
+    }
+    // Монтируем и кладём тестовый файл (Drop у FileSystem сбрасывает изменения в буфер).
+    {
+        let cursor = std::io::Cursor::new(&mut image);
+        let fs = fatfs::FileSystem::new(cursor, fatfs::FsOptions::new())
+            .expect("failed to mount FAT32 image");
+        let mut file = fs
+            .root_dir()
+            .create_file(FAT_TEST_FILE)
+            .expect("failed to create test file");
+        file.write_all(FAT_TEST_CONTENT)
+            .expect("failed to write test file");
+        file.flush().expect("failed to flush test file");
     }
 
     if let Some(parent) = disk.parent() {
@@ -116,8 +144,8 @@ fn generate_disk_image(manifest: &str) {
     std::fs::write(&disk, &image).expect("failed to write ferros-disk.img");
 }
 
-/// Уже ли на месте диск-образ нужного размера с нашей сигнатурой в начале.
-fn disk_image_current(path: &std::path::Path, size: u64, signature: &[u8]) -> bool {
+/// Уже ли на месте FAT-образ нужного размера (по сигнатуре загрузочного сектора 0x55AA).
+fn disk_image_is_fat(path: &std::path::Path, size: u64) -> bool {
     use std::io::Read;
     let Ok(mut file) = std::fs::File::open(path) else {
         return false;
@@ -126,8 +154,6 @@ fn disk_image_current(path: &std::path::Path, size: u64, signature: &[u8]) -> bo
         Ok(meta) if meta.len() == size => {}
         _ => return false,
     }
-    // Читаем ровно длину сигнатуры (не фиксированный буфер) — чтобы проверка не разъехалась,
-    // если сигнатуру когда-нибудь изменят по длине.
-    let mut head = vec![0u8; signature.len()];
-    file.read_exact(&mut head).is_ok() && head == signature
+    let mut boot = [0u8; 512];
+    file.read_exact(&mut boot).is_ok() && boot[510] == 0x55 && boot[511] == 0xAA
 }

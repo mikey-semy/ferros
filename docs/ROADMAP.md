@@ -46,7 +46,9 @@ process reaping / polish still pending (needs a freeing frame allocator).
     virtio-blk device, decode its BARs.
   - **M6b — Legacy virtio-blk driver** (done). Bus-master + one virtqueue (DMA), polled
     `read_sector`: read a sector off the virtual disk and verify its content.
-  - **M6c — Hand-rolled FAT read:** BPB → FAT → root dir → cluster chain → file bytes.
+  - **M6c — Hand-rolled FAT32 read** (done). BPB → FAT → root dir → cluster chain → file
+    bytes; reads a file off the disk. Test image is FAT32 (image grown to 64 MiB), created by
+    `fatfs` as a build-only dependency; the kernel reader is hand-rolled.
   - **M6d — VFS + file syscalls:** `open`/`read`/`close`/`lseek`, per-process fd table;
     a user program reads a file from disk.
 - **M7 — Shell.** init process, interactive shell, basic utilities, line editing.
