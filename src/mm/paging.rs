@@ -106,7 +106,12 @@ pub fn user_range_accessible(start: u64, len: u64, need_write: bool) -> bool {
             }
             _ => return false, // не отображена / битый адрес
         }
-        addr += 4096;
+        // Следующая страница. На переполнении (диапазон у самой вершины адресного
+        // пространства) страниц больше нет — выходим, не паникуя на overflow.
+        addr = match addr.checked_add(4096) {
+            Some(next) => next,
+            None => break,
+        };
     }
     true
 }

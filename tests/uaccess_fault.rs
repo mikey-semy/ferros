@@ -57,6 +57,12 @@ fn main(boot_info: &'static BootInfo) -> ! {
         }
     }
 
+    // Освобождаем `&mut` на L4 ядра (его держит `mapper`) до того, как тесты позовут
+    // `user_range_accessible`: тот строит свой `OffsetPageTable` над ТОЙ ЖЕ таблицей ядра —
+    // иначе было бы два `&mut` на одну таблицу (UB). В бою такого нет: при syscall активна
+    // таблица процесса, а не ядра.
+    core::mem::drop(mapper);
+
     test_main();
     ferros::hlt_loop();
 }
