@@ -113,10 +113,12 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
 - **AddressSpace is x86_64-specific but lives in `mm`.** Like the existing `mm::paging`
   (which already uses `Cr3`/`OffsetPageTable` directly), `mm::addr_space` is not yet behind
   the arch seam (D7). Abstract the whole `mm` page-table layer per-arch in a later pass.
-- **No process reaping (M5c3a).** `exit` marks the task `Dead` and the scheduler skips it,
-  but its memory (kernel stack, the process PML4 + user page tables + user frames) is never
-  freed — a zombie leak. Add reaping (and a real process table) in M5c3b; depends on a
-  frame allocator that frees (M3 item).
+- ~~**No process reaping (M5c3a).**~~ **Addressed (M6e3):** a deferred reaper on the zero
+  thread (`thread::reap`, run from the executor loop) frees each `Dead` task's address space
+  (`AddressSpace::destroy`), kernel stack (`Box`), and fd table (`forget_process`). Remaining:
+  the reaped `Thread` stays as a tiny `Reaped` tombstone in the scheduler `Vec` (no compaction
+  yet); kernel threads (M4) still aren't torn down; there's still no real process table / PIDs
+  (that's Phase 2a, fork/exec/wait).
 - **Shared global `syscall` kernel stack (M5c3a).** The `syscall` entry trampoline still
   switches to one global `SYSCALL_KERNEL_RSP` (M5a). Safe while syscalls run to completion
   with IF=0 (non-preemptible, non-reentrant), but a blocking/yielding syscall or SMP needs a
@@ -216,11 +218,11 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   no `O_*` flags, no directories (root, 8.3 names — the M6c FAT limits), and `read` on fd 0
   (stdin) isn't a thing. Paths are capped at 256 bytes. A real file model (streaming, write,
   a proper VFS with mount points/inodes) is later work.
-- **Per-process fd table keyed by CR3, leaks on exit (M6d2).** `syscall::files` stores each
-  process's open files in a `BTreeMap` keyed by its PML4 physical address (avoids touching
-  the scheduler). Correct **only because frames are never reused** (the allocator doesn't
-  free — M3): a recycled PML4 frame would inherit a dead process's fds. On `exit` the entry
-  is **not** removed (zombie leak) — when reaping lands, clear `PROCESSES[cr3]` there.
+- **Per-process fd table keyed by CR3 (M6d2; leak fixed M6e3).** `syscall::files` stores each
+  process's open files in a `BTreeMap` keyed by its PML4 physical address (avoids touching the
+  scheduler). Now that frames are recycled (M6e1), the reaper **must** drop the entry on exit
+  (`forget_process`) — done (M6e3) — else a recycled PML4 would inherit a dead process's fds.
+  The CR3 key is still a stand-in for a real PID/process table (Phase 2a).
 - **A syscall holds the process-files lock across copy-to-user (M6d2).** `sys_read` keeps the
   global `PROCESSES` `Mutex` while it `copy_to_user`s the data. Safe on single-CPU (syscalls
   run `IF=0`, no ISR touches the map), but on SMP this serialises all file I/O and a blocking

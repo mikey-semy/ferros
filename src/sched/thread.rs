@@ -21,6 +21,7 @@
 //! M4e) и при завершении процесса ([`exit_current`]).
 
 use crate::arch::context;
+use crate::mm::addr_space::AddressSpace;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -41,9 +42,13 @@ static PREEMPTION_ENABLED: AtomicBool = AtomicBool::new(false);
 enum State {
     /// Готов исполняться.
     Runnable,
-    /// Завершён (`exit`); планировщик его пропускает. Память пока не освобождаем (зомби) —
-    /// реапинг в M5c3b (см. `docs/HARDENING.md`).
+    /// Завершён (`exit`), но ресурсы ещё не освобождены. Планировщик его пропускает; reaper
+    /// (M6e3) позже освободит его память.
     Dead,
+    /// Завершён И освобождён reaper'ом (адресное пространство, стек, дескрипторы возвращены).
+    /// Остаётся «надгробием» в `Vec` планировщика (структура `Thread` крошечная); уплотнение
+    /// `Vec` — позже (HARDENING).
+    Reaped,
 }
 
 /// Контекст потока: сохранённый указатель стека плюс владение его памятью; для
@@ -52,8 +57,8 @@ struct Thread {
     /// Сохранённый `rsp` потока (в его ядровом стеке). Обновляется при переключении прочь.
     rsp: u64,
     /// Память стека (ядрового). `None` у «нулевого» потока — он на стеке ядра от загрузчика.
-    /// Поле держит память живой; напрямую не читается.
-    _stack: Option<Box<[u8]>>,
+    /// Держит память живой; reaper (M6e3) забирает её (`take`), чтобы освободить.
+    stack: Option<Box<[u8]>>,
     /// Адресное пространство (корень PML4). `None` — общее пространство ядра (поток ядра).
     cr3: Option<PhysFrame>,
     /// Вершина стека ядра этого потока — ставится в rsp0 при переключении на него (нужно
@@ -84,7 +89,7 @@ pub fn init() {
         *guard = Some(Scheduler {
             threads: vec![Thread {
                 rsp: 0,
-                _stack: None,
+                stack: None,
                 cr3: None,
                 kernel_stack_top: 0,
                 state: State::Runnable,
@@ -113,7 +118,7 @@ pub fn spawn(entry: extern "C" fn() -> !) {
 
     push_thread(Thread {
         rsp,
-        _stack: Some(stack),
+        stack: Some(stack),
         cr3: None,
         kernel_stack_top: top as u64,
         state: State::Runnable,
@@ -129,7 +134,7 @@ pub fn spawn(entry: extern "C" fn() -> !) {
 pub fn add_user_task(rsp: u64, cr3: PhysFrame, kernel_stack_top: u64, kstack: Box<[u8]>) {
     push_thread(Thread {
         rsp,
-        _stack: Some(kstack),
+        stack: Some(kstack),
         cr3: Some(cr3),
         kernel_stack_top,
         state: State::Runnable,
@@ -156,8 +161,9 @@ pub fn stop_preemption() {
 }
 
 /// Завершает **текущий** поток: помечает его `Dead` (планировщик больше его не выберет) и
-/// переключается на другой готовый поток. Не возвращается. Память завершённого потока пока
-/// не освобождаем (зомби) — реапинг в M5c3b. Зовётся из обработчика `exit` (M5c3).
+/// переключается на другой готовый поток. Не возвращается. Сам поток не может освободить свой
+/// же стек/адресное пространство (он на них исполняется) — это позже делает [`reap`] на
+/// другом потоке. Зовётся из обработчика `exit` (M5c3).
 ///
 /// # Panics
 /// Если нет ни одного другого готового потока (так быть не должно — «нулевой» поток ядра
@@ -174,6 +180,55 @@ pub fn exit_current() -> ! {
     switch_to_next();
     // switch_to_next ушёл в другой готовый поток; в мёртвый поток уже не вернутся.
     unreachable!("exit_current returned to a dead task");
+}
+
+/// Освобождает ресурсы завершённых (`Dead`) потоков: их адресное пространство, стек ядра и
+/// таблицу дескрипторов. Вызывать из **безопасного контекста** (главный цикл на «нулевом»
+/// потоке, в адресном пространстве ядра, IF=1) — не с мёртвого стека, который освобождаем.
+///
+/// Не уплотняет `Vec`: обработанный поток помечается `Reaped` и остаётся «надгробием» (его
+/// структура крошечная) — так не нужно двигать индекс `current`/переключение. Большие
+/// ресурсы (фреймы АП, стек, дескрипторы) при этом возвращаются.
+///
+/// Делать нечего, пока не установлен глобальный аллокатор ([`crate::mm::frame::install`]) —
+/// иначе нечем освобождать (и потеряли бы `cr3`); тогда просто выходим.
+pub fn reap() {
+    if !crate::mm::frame::global_installed() {
+        return;
+    }
+    let phys_offset = crate::mm::paging::phys_mem_offset();
+
+    // 1) Под замком собираем «трупы»: забираем cr3 и стек, помечаем Reaped (не трогаем
+    //    текущий поток). Освобождаем ПОСЛЕ снятия замка (порядок: SCHEDULER → FRAME_ALLOC).
+    /// Изъятые из завершённого потока ресурсы: его адресное пространство (PML4) и ядровый стек.
+    type Corpse = (Option<PhysFrame>, Option<Box<[u8]>>);
+    let mut corpses: Vec<Corpse> = Vec::new();
+    interrupts::without_interrupts(|| {
+        let mut guard = SCHEDULER.lock();
+        if let Some(sched) = guard.as_mut() {
+            let cur = sched.current;
+            for (i, t) in sched.threads.iter_mut().enumerate() {
+                if i != cur && t.state == State::Dead {
+                    corpses.push((t.cr3.take(), t.stack.take()));
+                    t.state = State::Reaped;
+                }
+            }
+        }
+    });
+
+    // 2) Освобождаем ресурсы трупов (замок планировщика уже снят).
+    for (cr3, stack) in corpses {
+        if let Some(frame) = cr3 {
+            // SAFETY: труп помечен Dead→Reaped, это не текущий поток и не активное адресное
+            // пространство (reaper идёт на «нулевом» потоке в АП ядра), живого маппера на
+            // него нет — значит его приватное АП можно разобрать.
+            crate::mm::frame::with_global(|fa| unsafe {
+                AddressSpace::from_pml4_frame(frame).destroy(phys_offset, fa);
+            });
+            crate::syscall::files::forget_process(frame.start_address().as_u64());
+        }
+        drop(stack); // освобождаем Box ядрового стека (в кучу)
+    }
 }
 
 /// Уступает CPU следующему готовому потоку (round-robin) — **кооперативно**. Переключение
