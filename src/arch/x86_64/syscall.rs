@@ -140,8 +140,127 @@ extern "C" fn ferros_syscall_dispatch(regs: *mut SyscallRegs) {
     // SAFETY: трамплин только что построил валидный SyscallRegs на стеке ядра и передал
     // на него указатель в rdi.
     let regs = unsafe { &mut *regs };
+    // `execve` (и далее `fork`) переписывают сохранённое состояние возврата пользователя
+    // (rip/rsp/rflags/регистры), поэтому обрабатываются здесь, где доступен весь SyscallRegs;
+    // остальные системные вызовы идут в переносимый диспетчер и лишь возвращают i64 в rax.
+    if regs.rax == crate::syscall::abi::SYS_EXECVE {
+        exec(regs, regs.rdi);
+        return;
+    }
     let args = [regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9];
     regs.rax = crate::syscall::dispatch(regs.rax, args, regs.user_rsp) as u64;
+}
+
+/// `execve(path, argv, envp)` (M6f2): заменяет образ текущего процесса программой, прочитанной
+/// **с диска** (FAT). `argv`/`envp` пока игнорируем. При успехе не возвращается «как вызов» —
+/// переписывает сохранённое состояние так, что `sysretq` уходит в точку входа новой программы;
+/// при ошибке кладёт `-errno` в `rax`, а старый образ процесса остаётся нетронутым.
+fn exec(regs: &mut SyscallRegs, path_ptr: u64) {
+    use crate::syscall::abi;
+
+    // 1) Путь — из памяти СТАРОГО (ещё активного) процесса.
+    let path = match crate::syscall::uaccess::read_user_cstr(path_ptr) {
+        Ok(p) => p,
+        Err(errno) => {
+            regs.rax = (-errno) as u64;
+            return;
+        }
+    };
+    let path = match core::str::from_utf8(&path) {
+        Ok(s) => s,
+        Err(_) => {
+            regs.rax = (-abi::ENOENT) as u64;
+            return;
+        }
+    };
+
+    // 2) Байты программы — из файловой системы.
+    let bytes = match crate::fs::open(path) {
+        Ok(b) => b,
+        Err(_) => {
+            regs.rax = (-abi::ENOENT) as u64;
+            return;
+        }
+    };
+
+    let phys_offset = crate::mm::paging::phys_mem_offset();
+    let (old_pml4, cr3_flags) = Cr3::read();
+    // Копируем ИМЕННО ядровую таблицу: активна сейчас таблица текущего процесса, её
+    // пользовательский слот в новое пространство тащить нельзя (см. new_sharing_kernel).
+    let kernel_pml4 = crate::sched::thread::kernel_cr3();
+
+    // 3) Строим новое адресное пространство и грузим в него ELF, ВРЕМЕННО активируя его, и
+    //    возвращаем активным старое — чтобы ошибка загрузки оставила процесс неизменным.
+    let built = crate::mm::frame::with_global(|fa| {
+        // SAFETY: phys_offset корректен; копируем ядровую таблицу (без чужого user-слота).
+        let aspace = unsafe { AddressSpace::new_sharing_kernel(phys_offset, kernel_pml4, fa) };
+        // SAFETY: в новом пространстве отображено ядро, поэтому код ядра продолжает работать.
+        unsafe { Cr3::write(aspace.pml4_frame(), cr3_flags) };
+        let loaded = {
+            // SAFETY: единственный живой маппер на это пространство в пределах блока.
+            let mut m = unsafe { aspace.mapper(phys_offset) };
+            let r = crate::syscall::elf::load(&bytes, &mut m, fa);
+            if r.is_ok() {
+                let stack_page = Page::containing_address(VirtAddr::new(USER_STACK_VA));
+                crate::mm::paging::map_user_page(stack_page, &mut m, fa);
+            }
+            r
+        };
+        // SAFETY: возвращаем активным старое пространство (на случай ошибки — оно цело).
+        unsafe { Cr3::write(old_pml4, cr3_flags) };
+        match loaded {
+            Ok(entry) => Ok((aspace.pml4_frame(), entry)),
+            Err(_) => {
+                // SAFETY: свежесобранное (сейчас неактивное) пространство бросаем — освобождаем.
+                unsafe { aspace.destroy(phys_offset, fa) };
+                Err(())
+            }
+        }
+    });
+    let (new_pml4, entry) = match built {
+        Some(Ok(x)) => x,
+        Some(Err(())) => {
+            regs.rax = (-abi::ENOEXEC) as u64;
+            return;
+        }
+        None => {
+            // Глобальный аллокатор не установлен (execve до загрузки ядра) — не должно быть.
+            regs.rax = (-abi::ENOMEM) as u64;
+            return;
+        }
+    };
+
+    // 4) Коммит: переключаем текущий поток на новое пространство, освобождаем старое,
+    //    переносим таблицу дескрипторов (fd переживают exec).
+    let old_pml4 = crate::sched::thread::exec_replace_cr3(new_pml4);
+    // SAFETY: активируем новое пространство — `sysretq` ниже разрешает rip/rsp уже в нём.
+    unsafe { Cr3::write(new_pml4, cr3_flags) };
+    // SAFETY: старое пространство теперь неактивно (мы на новом) — разбираем его.
+    crate::mm::frame::with_global(|fa| unsafe {
+        AddressSpace::from_pml4_frame(old_pml4).destroy(phys_offset, fa);
+    });
+    crate::syscall::files::rekey_process(
+        old_pml4.start_address().as_u64(),
+        new_pml4.start_address().as_u64(),
+    );
+
+    // 5) Переписываем сохранённое состояние пользователя: чистый старт новой программы.
+    regs.rip = entry;
+    regs.user_rsp = USER_STACK_VA + 4096;
+    regs.rflags = 0x202; // IF=1 + зарезервированный бит
+    regs.rax = 0;
+    regs.rdi = 0;
+    regs.rsi = 0;
+    regs.rdx = 0;
+    regs.r10 = 0;
+    regs.r8 = 0;
+    regs.r9 = 0;
+    regs.rbx = 0;
+    regs.rbp = 0;
+    regs.r12 = 0;
+    regs.r13 = 0;
+    regs.r14 = 0;
+    regs.r15 = 0;
 }
 
 /// Размер стека ядра под обработку `syscall` (5 страниц по 4 КиБ).
@@ -218,8 +337,9 @@ pub unsafe fn spawn_user(
     interrupts::disable();
 
     let (kernel_pml4, cr3_flags) = Cr3::read();
-    // SAFETY: phys_offset корректен; новое пространство содержит все отображения ядра.
-    let aspace = unsafe { AddressSpace::new_sharing_kernel(phys_offset, frame_allocator) };
+    // SAFETY: phys_offset корректен; копируем именно ядровую таблицу (она сейчас активна).
+    let aspace =
+        unsafe { AddressSpace::new_sharing_kernel(phys_offset, kernel_pml4, frame_allocator) };
     // SAFETY: в пространстве процесса отображено ядро, поэтому код ядра продолжает работать.
     unsafe { Cr3::write(aspace.pml4_frame(), cr3_flags) };
 

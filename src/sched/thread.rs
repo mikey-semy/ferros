@@ -165,6 +165,40 @@ pub fn add_user_task(rsp: u64, cr3: PhysFrame, kernel_stack_top: u64, kstack: Bo
     });
 }
 
+/// Меняет адресное пространство (CR3) ТЕКУЩЕГО потока на `new` и возвращает старое — для
+/// `execve` (M6f2), который заменяет образ процесса, оставляя его поток/стек ядра прежними.
+///
+/// # Panics
+/// Если текущий поток — поток ядра (без своего адресного пространства).
+pub fn exec_replace_cr3(new: PhysFrame) -> PhysFrame {
+    interrupts::without_interrupts(|| {
+        let mut guard = SCHEDULER.lock();
+        let sched = guard.as_mut().expect("scheduler not initialized");
+        let cur = sched.current;
+        let old = sched.threads[cur]
+            .cr3
+            .expect("exec on a kernel thread (no address space)");
+        sched.threads[cur].cr3 = Some(new);
+        old
+    })
+}
+
+/// Корень таблиц страниц ядра (общий для всех адресных пространств). Нужен `execve`/`fork`,
+/// чтобы строить новое пространство, копируя именно ядровые L4-записи (а не активные —
+/// активной может быть таблица пользовательского процесса).
+///
+/// # Panics
+/// Если планировщик не инициализирован.
+pub fn kernel_cr3() -> PhysFrame {
+    interrupts::without_interrupts(|| {
+        SCHEDULER
+            .lock()
+            .as_ref()
+            .expect("scheduler not initialized")
+            .kernel_cr3
+    })
+}
+
 /// PID текущего процесса/потока. 0, если планировщик ещё не инициализирован.
 pub fn current_pid() -> u32 {
     interrupts::without_interrupts(|| {

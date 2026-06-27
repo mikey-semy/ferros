@@ -135,8 +135,10 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   `Option<PhysFrame>` and the switch goes through `arch::context::switch_task`; the data type
   leaks x86_64 into the portable scheduler. A neutral "address-space handle" is a later seam.
 - **Process address spaces snapshot the kernel's L4 at creation (M5c3a).**
-  `AddressSpace::new_sharing_kernel` copies the active L4 entries once; a kernel mapping
-  added *later* (a new L4 entry) would NOT appear in already-created process address spaces.
+  `AddressSpace::new_sharing_kernel` copies the **kernel** PML4's L4 entries once (M6f2: it
+  takes the kernel frame explicitly, not the active one — so `execve`/`fork` from a user
+  context don't drag the caller's user slot into the new space); a kernel mapping added
+  *later* (a new L4 entry) would NOT appear in already-created process address spaces.
   This is correct **only** because the kernel heap is a fixed, pre-mapped 100 KiB region
   (one L4 entry, never grows) and the kernel maps no new L4 entries after boot — so process
   kernel stacks (heap) and the loader's allocations always live in copied entries. A growing
