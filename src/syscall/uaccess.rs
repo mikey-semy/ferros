@@ -91,6 +91,9 @@ pub fn copy_to_user(dst: u64, src: &[u8]) -> Result<(), i64> {
 /// `with_user_bytes`), останавливается на нулевом байте. `Err(EFAULT)` на недоступной
 /// странице, `Err(EINVAL)` если нуль не встретился в пределах лимита.
 pub fn read_user_cstr(ptr: u64) -> Result<Vec<u8>, i64> {
+    // Сначала убеждаемся, что указатель в пользовательской половине: тогда вычисление
+    // границы страницы ниже (`(addr | 0xFFF) + 1`) заведомо не переполнит u64.
+    validate(ptr, 1)?;
     let mut out = Vec::new();
     let mut addr = ptr;
     loop {

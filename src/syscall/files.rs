@@ -105,11 +105,14 @@ pub fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
             Some(f) => f,
             None => return -abi::EBADF,
         };
-        let available = file.data.len() - file.offset;
-        let n = available.min(count);
+        // Позиция могла уйти ЗА конец файла (`lseek` это разрешает) — тогда читаем 0 (EOF),
+        // а не уходим в переполнение `len - offset`. `start` зажат в пределах файла.
+        let len = file.data.len();
+        let start = file.offset.min(len);
+        let n = (len - start).min(count);
         // Копируем срез файла в память пользователя ДО сдвига позиции (срез заимствует
         // file.data; заём кончается с вызовом, дальше можно менять offset).
-        match uaccess::copy_to_user(buf, &file.data[file.offset..file.offset + n]) {
+        match uaccess::copy_to_user(buf, &file.data[start..start + n]) {
             Ok(()) => {
                 file.offset += n;
                 n as i64
