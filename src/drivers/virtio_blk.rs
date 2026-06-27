@@ -23,6 +23,8 @@
 //! Доступ к кольцам — сырые volatile-обращения по адресам `phys + phys_mem_offset`; весь
 //! `unsafe` собран в методах драйвера с `// SAFETY` (D9).
 
+// Два разных модуля `pci`: `crate::arch::pci` — механика портов конфигурации (шов, ниже
+// зовём по полному пути), `crate::drivers::pci` — переносимая модель устройства (find/Bar).
 use crate::arch::io;
 use crate::drivers::pci::{self, Bar};
 use crate::mm::frame::BootInfoFrameAllocator;
@@ -155,8 +157,10 @@ pub fn init(phys_mem_offset: VirtAddr, frame_allocator: &mut BootInfoFrameAlloca
         io::outb(io_base + REG_DEVICE_STATUS, STATUS_ACK);
         io::outb(io_base + REG_DEVICE_STATUS, STATUS_ACK | STATUS_DRIVER);
 
-        // 2) Фичи: для базового чтения не нужна ни одна — принимаем 0.
-        let _features = io::inl(io_base + REG_DEVICE_FEATURES);
+        // 2) Согласование фич: читаем предлагаемые устройством (шаг протокола), но для
+        // базового чтения не берём ни одной — пишем 0. Чтение оставляем как явный шаг
+        // handshake; не удалять.
+        let _device_features = io::inl(io_base + REG_DEVICE_FEATURES);
         io::outl(io_base + REG_DRIVER_FEATURES, 0);
 
         // 3) Очередь 0: узнаём её размер и считаем раскладку.
