@@ -178,6 +178,12 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   no partial reads). It also re-reads the BPB on every `mount()` and re-reads FAT/dir sectors
   per call with **no caching** — O(sectors) per lookup. A real VFS + a buffer cache + LFN +
   subdirectories + write come later.
+- **FAT reader trusts a well-formed image (M6c).** It now bounds cluster numbers to the
+  volume (`valid_cluster`, prevents sector-address overflow / wild reads) and caps chain
+  traversal (prevents a cyclic-chain hang), but it still **trusts the directory's file size**:
+  if the cluster chain is shorter than `size`, `read_file` returns a silently *truncated*
+  buffer rather than an error. Like the ELF loader (D10), this is defensive-but-not-complete;
+  a fuller reader would cross-check size vs chain length and surface mismatches.
 - **virtio-blk is polled, single-request, read-only (M6b).** The driver suppresses the
   device interrupt (`VIRTQ_AVAIL_F_NO_INTERRUPT`) and busy-polls the used ring — no IRQ
   handler, so a `read_sector` blocks the caller (and, under the global `DEVICE` Mutex,

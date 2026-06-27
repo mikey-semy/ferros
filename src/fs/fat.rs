@@ -23,10 +23,9 @@
 use crate::drivers::virtio_blk::{self, BlkError, SECTOR_SIZE};
 use alloc::vec::Vec;
 
-/// Маска значащих бит записи FAT32 (старшие 4 бита зарезервированы).
+/// Маска значащих бит записи FAT32 (старшие 4 бита зарезервированы). Конец цепочки (EOC) —
+/// значение ≥ 0x0FFFFFF8; такие (как и 0/1 и всё вне тома) отсекает [`Fat32::valid_cluster`].
 const FAT32_ENTRY_MASK: u32 = 0x0FFF_FFFF;
-/// Кластеры со значением ≥ этого — конец цепочки (EOC).
-const FAT32_EOC: u32 = 0x0FFF_FFF8;
 /// Первый «настоящий» кластер данных (0 и 1 зарезервированы).
 const FIRST_DATA_CLUSTER: u32 = 2;
 /// Размер одной записи каталога (байт).
@@ -65,6 +64,10 @@ pub struct Fat32 {
     data_start_sector: u32,
     /// Номер первого кластера корневого каталога.
     root_cluster: u32,
+    /// Число кластеров данных в томе (для проверки границ: валидны номера
+    /// `2 .. 2 + cluster_count`). Защищает от переполнения арифметики адреса сектора и от
+    /// «диких» номеров в повреждённой FAT.
+    cluster_count: u32,
 }
 
 /// Найденная запись каталога (то, что нам нужно для чтения файла).
@@ -112,25 +115,41 @@ impl Fat32 {
         let num_fats = boot[16] as u32;
         let root_entry_count = read_u16(&boot, 17); // FAT32: 0
         let fat_size_16 = read_u16(&boot, 22); // FAT32: 0
+        let total_sectors = read_u32(&boot, 32); // FAT32: общее число секторов (TotSec32)
         let fat_size_32 = read_u32(&boot, 36); // FAT32: размер одной FAT в секторах
         let root_cluster = read_u32(&boot, 44);
 
         // Признаки FAT32: корневой каталог не фиксированной длины (root_entry_count == 0),
-        // размер FAT берётся из 32-битного поля.
-        if root_entry_count != 0 || fat_size_16 != 0 || fat_size_32 == 0 || sectors_per_cluster == 0
+        // размер FAT — в 32-битном поле. Также отвергаем заведомо битую геометрию.
+        if root_entry_count != 0
+            || fat_size_16 != 0
+            || fat_size_32 == 0
+            || sectors_per_cluster == 0
+            || num_fats == 0
         {
             return Err(FatError::NotFat32);
         }
 
+        let data_start_sector = reserved_sectors + num_fats * fat_size_32;
+        // Сколько кластеров данных в томе — для проверки границ номеров кластеров.
+        let cluster_count = total_sectors.saturating_sub(data_start_sector) / sectors_per_cluster;
+
         Ok(Fat32 {
             sectors_per_cluster,
             fat_start_sector: reserved_sectors,
-            data_start_sector: reserved_sectors + num_fats * fat_size_32,
+            data_start_sector,
             root_cluster,
+            cluster_count,
         })
     }
 
-    /// Первый сектор кластера `cluster` (≥ 2).
+    /// Валиден ли номер кластера: в пределах области данных тома. Отсекает 0/1, метку EOC и
+    /// «дикие» значения из повреждённой FAT — значит арифметика адреса сектора не переполнится.
+    fn valid_cluster(&self, cluster: u32) -> bool {
+        cluster >= FIRST_DATA_CLUSTER && cluster < FIRST_DATA_CLUSTER + self.cluster_count
+    }
+
+    /// Первый сектор кластера `cluster` (предполагается валидным — см. [`Self::valid_cluster`]).
     fn first_sector_of_cluster(&self, cluster: u32) -> u32 {
         self.data_start_sector + (cluster - FIRST_DATA_CLUSTER) * self.sectors_per_cluster
     }
@@ -150,7 +169,11 @@ impl Fat32 {
     fn find_in_dir(&self, start_cluster: u32, name: &str) -> Result<Option<DirEntry>, FatError> {
         let target = short_name_83(name);
         let mut cluster = start_cluster;
-        while (FIRST_DATA_CLUSTER..FAT32_EOC).contains(&cluster) {
+        // Ограничиваем число пройденных кластеров: цепочка не может быть длиннее всех
+        // кластеров тома — иначе это цикл в повреждённой FAT (иначе зациклились бы).
+        let mut steps_left = self.cluster_count;
+        while self.valid_cluster(cluster) && steps_left > 0 {
+            steps_left -= 1;
             let first = self.first_sector_of_cluster(cluster);
             for s in 0..self.sectors_per_cluster {
                 let mut buf = [0u8; SECTOR_SIZE];
@@ -190,7 +213,7 @@ impl Fat32 {
         let mut data = Vec::with_capacity(entry.size as usize);
         let mut remaining = entry.size as usize;
         let mut cluster = entry.first_cluster;
-        while remaining > 0 && (FIRST_DATA_CLUSTER..FAT32_EOC).contains(&cluster) {
+        while remaining > 0 && self.valid_cluster(cluster) {
             let first = self.first_sector_of_cluster(cluster);
             for s in 0..self.sectors_per_cluster {
                 if remaining == 0 {
