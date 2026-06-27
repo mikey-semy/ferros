@@ -66,6 +66,26 @@ impl BootInfoFrameAllocator {
         }
     }
 
+    /// (Диагностика/тесты) Сколько фреймов выдано курсором (bump-аллокацией). Повторные
+    /// выдачи из списка свободных сюда не входят.
+    pub fn cursor(&self) -> usize {
+        self.next
+    }
+
+    /// (Диагностика/тесты) Длина списка свободных фреймов (обходит его по ссылкам).
+    pub fn free_list_len(&self) -> usize {
+        let mut len = 0;
+        let mut node = self.free_list;
+        while let Some(addr) = node {
+            len += 1;
+            // SAFETY: `addr` попал в список через `deallocate_frame`; первое слово фрейма —
+            // наша ссылка на следующий свободный.
+            let next = unsafe { core::ptr::read(link_word(addr)) };
+            node = (next != FREE_LIST_END).then(|| PhysAddr::new(next));
+        }
+        len
+    }
+
     /// Итератор по всем свободным фреймам из карты памяти.
     ///
     /// Цепочка: регионы → только `Usable` → диапазоны физ. адресов → шаг 4 КиБ →
