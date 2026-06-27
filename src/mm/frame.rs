@@ -151,6 +151,14 @@ impl FrameDeallocator<Size4KiB> for BootInfoFrameAllocator {
     /// освобождать так нельзя — непрерывность не восстановится.
     unsafe fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
         let addr = frame.start_address();
+        // Фрейм 0 не бывает usable (нижняя память зарезервирована), поэтому никогда не
+        // выдаётся и не освобождается; иначе его адрес столкнулся бы с сентинелом «конец
+        // списка» (0) и фрейм потерялся бы из списка. Ловим нарушение в debug.
+        debug_assert_ne!(
+            addr.as_u64(),
+            FREE_LIST_END,
+            "frame 0 must never be freed (collides with the free-list sentinel)"
+        );
         let prev_head = self.free_list.map_or(FREE_LIST_END, |p| p.as_u64());
         // SAFETY: фрейм только что освобождён вызывающим (его контракт) и отображён через
         // оффсет физпамяти — первое слово можно эксклюзивно записать.
