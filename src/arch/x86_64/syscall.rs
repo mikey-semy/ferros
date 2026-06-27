@@ -77,9 +77,6 @@ pub struct SyscallRegs {
 // одном ядре конкурентного доступа нет.
 static SYSCALL_SCRATCH: AtomicU64 = AtomicU64::new(0);
 static SYSCALL_KERNEL_RSP: AtomicU64 = AtomicU64::new(0);
-/// Сохранённый `rsp` ядра для возврата из кольца 3 обратно в вызвавший ядровый контекст
-/// (см. [`ferros_enter_user`] / [`ferros_resume_kernel`]).
-static KERNEL_RESUME_RSP: AtomicU64 = AtomicU64::new(0);
 
 // Входной трамплин `syscall` (цель MSR LSTAR). Переключается на стек ядра, сохраняет
 // регистры пользователя в SyscallRegs, зовёт диспетчер, восстанавливает регистры и
@@ -129,71 +126,22 @@ core::arch::global_asm!(
     dispatch = sym ferros_syscall_dispatch,
 );
 
-// Переход ядро → кольцо 3 (через `iretq`) и обратный «возврат» в сохранённый контекст
-// ядра (для одноразовой раскрутки из обработчика). Идея — как у переключения контекста
-// в M4: сохранить callee-saved + rsp ядра, прыгнуть, а потом восстановить и `ret`.
-//
-// ВНИМАНИЕ: это БУТСТРАП M5a — единственный кольцо-3-заход за раз через глобальный
-// `KERNEL_RESUME_RSP`. Настоящее планирование пользовательских потоков (вытеснение
-// кольца 3 по таймеру через `rsp0`, много процессов) строится в M5c НЕ поверх этого.
-core::arch::global_asm!(
-    ".global ferros_enter_user",
-    // rdi=entry, rsi=user_stack, rdx=user_cs, rcx=user_ss
-    "ferros_enter_user:",
-    "    push rbp",
-    "    push rbx",
-    "    push r12",
-    "    push r13",
-    "    push r14",
-    "    push r15",
-    "    mov [rip + {resume}], rsp", // сохранить rsp ядра для возврата
-    "    push rcx",                  // iretq-кадр: SS = user_ss
-    "    push rsi",                  //            RSP = user_stack
-    "    push 0x2",                  //            RFLAGS (IF=0, зарезерв. бит 1)
-    "    push rdx",                  //            CS = user_cs
-    "    push rdi",                  //            RIP = entry
-    "    iretq",
-    ".global ferros_resume_kernel",
-    "ferros_resume_kernel:",
-    "    mov rsp, [rip + {resume}]",
-    "    pop r15",
-    "    pop r14",
-    "    pop r13",
-    "    pop r12",
-    "    pop rbx",
-    "    pop rbp",
-    "    ret", // «возврат» к вызвавшему ferros_enter_user
-    resume = sym KERNEL_RESUME_RSP,
-);
-
 extern "C" {
     fn ferros_syscall_entry();
-    /// Прыгает в кольцо 3 на `entry` с пользовательским стеком; «возвращается», когда
-    /// пользователь сделает вызов с исходом [`crate::syscall::SyscallOutcome::LeaveUser`].
-    fn ferros_enter_user(entry: u64, user_stack: u64, user_cs: u64, user_ss: u64);
-    /// Восстанавливает контекст ядра, сохранённый [`ferros_enter_user`], и возвращается
-    /// туда. Вызвавшему (диспетчеру) управление НЕ возвращает — отсюда тип `-> !`.
-    fn ferros_resume_kernel() -> !;
 }
 
 /// Glue между голым трамплином и переносимым диспетчером: распаковывает [`SyscallRegs`],
-/// зовёт [`crate::syscall::dispatch`] с аргументами по Linux-ABI и применяет исход.
+/// зовёт [`crate::syscall::dispatch`] с аргументами по Linux-ABI и кладёт результат в `rax`.
 ///
-/// Зовётся ТОЛЬКО из `ferros_syscall_entry`.
+/// Зовётся ТОЛЬКО из `ferros_syscall_entry`. Для `exit` диспетчер не возвращается (поток
+/// завершается планировщиком), поэтому `rax` тогда не присваивается — и `sysretq` не будет.
 #[no_mangle]
 extern "C" fn ferros_syscall_dispatch(regs: *mut SyscallRegs) {
     // SAFETY: трамплин только что построил валидный SyscallRegs на стеке ядра и передал
     // на него указатель в rdi.
     let regs = unsafe { &mut *regs };
     let args = [regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9];
-    match crate::syscall::dispatch(regs.rax, args, regs.user_rsp) {
-        crate::syscall::SyscallOutcome::Return(value) => regs.rax = value as u64,
-        crate::syscall::SyscallOutcome::LeaveUser => {
-            // SAFETY: парный к ferros_enter_user; восстанавливает сохранённый контекст
-            // ядра и возвращается в него (сюда уже не вернётся).
-            unsafe { ferros_resume_kernel() }
-        }
-    }
+    regs.rax = crate::syscall::dispatch(regs.rax, args, regs.user_rsp) as u64;
 }
 
 /// Размер стека ядра под обработку `syscall` (5 страниц по 4 КиБ).
@@ -237,71 +185,79 @@ pub fn init() {
 /// чтобы вся пользовательская память была в одном свободном у ядра слоте.
 pub const USER_STACK_VA: u64 = 0x7F80_1000_0000;
 
-/// Загружает и запускает пользовательскую программу из её ELF-образа в **собственном
-/// адресном пространстве** (M5c2): заводит процессу свой PML4 (память ядра общая), грузит
-/// туда сегменты, отводит страницу под стек, переключает `CR3` и прыгает в кольцо 3 на
-/// точку входа. На `exit` управление возвращается сюда, и мы восстанавливаем `CR3` ядра.
-/// Возвращает вершину пользовательского стека (тест сверяет с ней зафиксированный `user_rsp`).
+/// Размер ядрового стека пользовательского процесса (16 КиБ): на нём строится начальный
+/// контекст (трамплин входа) и на него (rsp0) садятся прерывания из кольца 3.
+const USER_KERNEL_STACK_SIZE: usize = 4096 * 4;
+
+/// Создаёт **пользовательский процесс** из ELF-образа и регистрирует его в планировщике как
+/// поток (M5c3): заводит процессу своё адресное пространство (свой PML4, память ядра общая),
+/// загружает в него сегменты ELF и отводит страницу под пользовательский стек, выделяет
+/// ядровый стек (rsp0 + начальный контекст), готовит вход в кольцо 3
+/// ([`crate::arch::context::init_user_thread_stack`]) и добавляет задачу в планировщик
+/// ([`crate::sched::thread::add_user_task`]). Сам в кольцо 3 НЕ входит — это сделает
+/// планировщик при первом переключении на эту задачу.
 ///
-/// Пока процесс активен (его `CR3`), ядро остаётся отображённым (мы скопировали L4-записи
-/// ядра), поэтому `syscall`/прерывания/этот код работают. Делаем всё с **выключенными
-/// прерываниями**: чужое адресное пространство активно, и вытеснение в этот момент увело бы
-/// другой поток в него же.
+/// Загрузка сегментов идёт при ВРЕМЕННО активном адресном пространстве процесса (так запись
+/// содержимого по пользовательским адресам видна CPU); на это время гасим прерывания, после —
+/// возвращаем активным пространство ядра.
 ///
 /// # Safety
 /// `phys_offset` — корректный оффсет физпамяти; `frame_allocator` валиден; куча поднята.
-/// VA сегментов ELF / `USER_STACK_VA` должны попадать в слот, свободный у ядра (иначе
-/// загрузчик вернёт ошибку коллизии / `map_to` запаникует).
+/// VA сегментов ELF / `USER_STACK_VA` должны попадать в слот, свободный у ядра.
 ///
 /// # Panics
 /// Если ELF не загрузился ([`crate::syscall::elf::load`] вернул ошибку).
-pub unsafe fn run_user_elf(
+pub unsafe fn spawn_user(
     elf_bytes: &[u8],
     phys_offset: VirtAddr,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
-) -> u64 {
+) {
+    // Создаём адресное пространство и грузим в него ELF. На время активации чужого
+    // пространства — без прерываний.
     let was_enabled = interrupts::are_enabled();
-    // Пока активно чужое адресное пространство — без прерываний (см. доку выше).
     interrupts::disable();
 
     let (kernel_pml4, cr3_flags) = Cr3::read();
-    // SAFETY: phys_offset корректен; создаём процессу свой PML4 с общей памятью ядра.
+    // SAFETY: phys_offset корректен; новое пространство содержит все отображения ядра.
     let aspace = unsafe { AddressSpace::new_sharing_kernel(phys_offset, frame_allocator) };
-
-    // Активируем адресное пространство процесса. Ядро в нём отображено (скопированные
-    // L4-записи), поэтому исполнение кода ядра продолжается без сбоев.
-    // SAFETY: PML4 процесса валиден и содержит все отображения ядра.
+    // SAFETY: в пространстве процесса отображено ядро, поэтому код ядра продолжает работать.
     unsafe { Cr3::write(aspace.pml4_frame(), cr3_flags) };
 
-    // Грузим сегменты и стек уже в активную таблицу процесса — теперь запись содержимого
-    // по пользовательским адресам видна CPU.
-    // SAFETY: единственный живой маппер на это пространство в пределах функции.
-    let mut pmapper = unsafe { aspace.mapper(phys_offset) };
-    let entry = crate::syscall::elf::load(elf_bytes, &mut pmapper, frame_allocator)
-        .expect("failed to load user ELF");
-    let stack_page = Page::containing_address(VirtAddr::new(USER_STACK_VA));
-    crate::mm::paging::map_user_page(stack_page, &mut pmapper, frame_allocator);
+    let entry = {
+        // SAFETY: единственный живой маппер на это пространство в пределах блока.
+        let mut pmapper = unsafe { aspace.mapper(phys_offset) };
+        let entry = crate::syscall::elf::load(elf_bytes, &mut pmapper, frame_allocator)
+            .expect("failed to load user ELF");
+        let stack_page = Page::containing_address(VirtAddr::new(USER_STACK_VA));
+        crate::mm::paging::map_user_page(stack_page, &mut pmapper, frame_allocator);
+        entry
+    };
+
+    // Возвращаем активным пространство ядра.
+    // SAFETY: kernel_pml4 — сохранённый корень таблиц ядра.
+    unsafe { Cr3::write(kernel_pml4, cr3_flags) };
+    if was_enabled {
+        interrupts::enable();
+    }
+
     let user_stack_top = USER_STACK_VA + 4096;
 
+    // Ядровый стек процесса (куча — уже в пространстве ядра). Вершина выровнена вниз по 16.
+    let mut kstack = alloc::vec![0u8; USER_KERNEL_STACK_SIZE].into_boxed_slice();
+    let ktop = (kstack.as_mut_ptr() as usize + kstack.len()) & !0xF;
+
     let sel = gdt::selectors();
-    // SAFETY: сегменты и стек отображены user-accessible в активной таблице процесса,
-    // селекторы кольца 3 валидны (RPL=3), стек выровнен. Управление вернётся на `exit`.
-    unsafe {
-        ferros_enter_user(
+    // SAFETY: `ktop` — вершина свежего выровненного ядрового стека; `entry`/`user_stack_top`
+    // отображены user-accessible в пространстве процесса; селекторы — кольца 3 (RPL=3).
+    let rsp = unsafe {
+        crate::arch::context::init_user_thread_stack(
+            ktop as *mut u8,
             entry,
             user_stack_top,
             sel.user_code.0 as u64,
             sel.user_data.0 as u64,
-        );
-    }
+        )
+    };
 
-    // Вернулись из кольца 3 (адресное пространство процесса ещё активно, ядро отображено).
-    // Возвращаем активным адресное пространство ядра.
-    // SAFETY: kernel_pml4 — сохранённый ранее корень таблиц ядра.
-    unsafe { Cr3::write(kernel_pml4, cr3_flags) };
-
-    if was_enabled {
-        interrupts::enable();
-    }
-    user_stack_top
+    crate::sched::thread::add_user_task(rsp, aspace.pml4_frame(), ktop as u64, kstack);
 }

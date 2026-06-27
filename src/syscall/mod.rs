@@ -26,15 +26,6 @@ pub mod uaccess;
 use crate::drivers::{serial, vga};
 use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
-/// Исход системного вызова — что трамплину делать после [`dispatch`].
-pub enum SyscallOutcome {
-    /// Вернуть значение в `rax` и `sysret` обратно в кольцо 3 (обычный путь).
-    Return(i64),
-    /// Не возвращаться в пользователя, а раскрутиться обратно в сохранённый контекст ядра
-    /// (так завершается процесс по `exit`; полноценное планирование/реапинг — в M5c).
-    LeaveUser,
-}
-
 // --- Наблюдаемость для тестов M5b (последний обработанный write/exit) ---
 
 /// Файловый дескриптор последнего `write` (тест сверяет, что это был stdout=1).
@@ -54,17 +45,20 @@ pub static EXIT_CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// Диспетчер системных вызовов: по номеру `nr` (Linux x86-64) направляет в обработчик.
 /// `args` уже разложены по Linux-ABI: `[rdi, rsi, rdx, r10, r8, r9]`. `user_rsp` —
-/// указатель стека пользователя на момент вызова.
-pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> SyscallOutcome {
+/// указатель стека пользователя на момент вызова. Возвращает результат в `rax`-конвенции
+/// (≥0 — успех, отрицательное — `-errno`). Для `exit` НЕ возвращается (поток завершается).
+pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
     match nr {
-        abi::SYS_WRITE => SyscallOutcome::Return(sys_write(args[0], args[1], args[2], user_rsp)),
+        abi::SYS_WRITE => sys_write(args[0], args[1], args[2], user_rsp),
         abi::SYS_EXIT | abi::SYS_EXIT_GROUP => {
             LAST_EXIT_CODE.store(args[0] as i64, Ordering::SeqCst);
             EXIT_CALLS.fetch_add(1, Ordering::SeqCst);
-            SyscallOutcome::LeaveUser
+            // Завершаем текущий поток: планировщик пометит его мёртвым и уйдёт на другой.
+            // Не возвращается — поэтому в `rax` ничего не кладётся и `sysret` не случится.
+            crate::sched::thread::exit_current();
         }
         // Неизвестный номер — как в Linux: -ENOSYS.
-        _ => SyscallOutcome::Return(-abi::ENOSYS),
+        _ => -abi::ENOSYS,
     }
 }
 
