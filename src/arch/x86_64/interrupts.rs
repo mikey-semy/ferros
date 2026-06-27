@@ -123,7 +123,9 @@ fn kill_faulting_user_process(what: &str, detail: u64, stack_frame: &InterruptSt
         "[user] ring-3 {what} (detail {detail:#x}) — killing process\n{stack_frame:#?}"
     );
     crate::syscall::USER_FAULT_KILLS.fetch_add(1, Ordering::SeqCst);
-    crate::sched::thread::exit_current();
+    // Завершаем с кодом 128+SIGSEGV(11)=139 (Unix-конвенция «убит сигналом»); полноценная
+    // доставка сигналов — в 2a5.
+    crate::sched::thread::exit_current(139);
 }
 
 /// Счётчик тиков таймера (PIT, ~18.2 Гц). Растёт на каждом прерывании; основа отсчёта

@@ -23,8 +23,18 @@ pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
 /// `lseek(fd, offset, whence)` — сдвинуть позицию чтения.
 pub const SYS_LSEEK: u64 = 8;
+/// `getpid()` — идентификатор текущего процесса.
+pub const SYS_GETPID: u64 = 39;
+/// `fork()` — создать копию процесса (2a3, зарезервировано).
+pub const SYS_FORK: u64 = 57;
+/// `execve(path, argv, envp)` — заменить образ процесса (2a2, зарезервировано).
+pub const SYS_EXECVE: u64 = 59;
 /// `exit(status)` — завершить вызывающий поток.
 pub const SYS_EXIT: u64 = 60;
+/// `wait4(pid, status, options, rusage)` — дождаться завершения потомка (2a4, зарезервировано).
+pub const SYS_WAIT4: u64 = 61;
+/// `kill(pid, sig)` — послать сигнал процессу (2a5, зарезервировано).
+pub const SYS_KILL: u64 = 62;
 /// `exit_group(status)` — завершить все потоки процесса (для нас пока то же, что `exit`).
 pub const SYS_EXIT_GROUP: u64 = 231;
 
@@ -32,6 +42,12 @@ pub const SYS_EXIT_GROUP: u64 = 231;
 
 /// Нет такого файла или каталога.
 pub const ENOENT: i64 = 2;
+/// Нет потомков (для `wait`).
+pub const ECHILD: i64 = 10;
+/// Ресурс временно недоступен.
+pub const EAGAIN: i64 = 11;
+/// Недостаточно памяти.
+pub const ENOMEM: i64 = 12;
 /// Плохой файловый дескриптор.
 pub const EBADF: i64 = 9;
 /// Некорректный адрес (указатель вне доступной пользователю памяти).

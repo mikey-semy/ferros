@@ -60,8 +60,10 @@ pending (needs a freeing frame allocator), a planned pre-M7 consolidation.
   - **M6e — Memory reclamation.** The kernel must stop leaking on process exit. Stages:
     **M6e1 — freeing frame allocator** (done; free-list + `deallocate_frame`), **M6e2 —
     address-space teardown**, **M6e3 — process reaping**.
-  - Then breadth feeding M7: **process model** (fork/exec/wait + signals), then **filesystem**
-    (write + subdirectories + a real VFS).
+  - **M6f — Process model** (in progress). PIDs + fork/exec/wait + basic signals. Stages:
+    **M6f1 — process table (PIDs + `getpid`)** (done), M6f2 `execve`, M6f3 `fork`, M6f4 `wait`,
+    M6f5 signals.
+  - Then **filesystem** breadth (write + subdirectories + a real VFS).
 - **M7 — Shell.** init process, interactive shell, basic utilities, line editing.
 
 ## Tier D — A "real" OS

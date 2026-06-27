@@ -34,6 +34,9 @@ pub static FAULTER_ELF: &[u8] = include_bytes!(env!("USER_FAULTER_ELF"));
 /// системные вызовы.
 pub static READER_ELF: &[u8] = include_bytes!(env!("USER_READER_ELF"));
 
+/// Встроенная проверка `getpid` (M6f1): завершается со своим PID как кодом возврата.
+pub static GETPIDTEST_ELF: &[u8] = include_bytes!(env!("USER_GETPIDTEST_ELF"));
+
 /// Почему ELF не удалось загрузить.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfError {
