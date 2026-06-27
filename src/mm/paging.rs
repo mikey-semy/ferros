@@ -26,14 +26,25 @@
 //! такого «оффсетного» перевода даёт [`OffsetPageTable`] из крейта `x86_64` —
 //! её и возвращает [`init`].
 
+use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::{
     registers::control::Cr3,
     structures::paging::{
-        FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame,
-        Size4KiB,
+        mapper::TranslateResult, FrameAllocator, Mapper, OffsetPageTable, Page, PageTable,
+        PageTableFlags, PhysFrame, Size4KiB, Translate,
     },
     PhysAddr, VirtAddr,
 };
+
+/// Оффсет, по которому bootloader отобразил всю физическую память (`virt = phys + offset`),
+/// сохранённый при [`init`] для последующего доступа без проброса аргумента (например, из
+/// [`user_range_accessible`]). 0 — «ещё не инициализирован».
+static PHYS_MEM_OFFSET: AtomicU64 = AtomicU64::new(0);
+
+/// Оффсет отображения физпамяти, сохранённый в [`init`].
+pub fn phys_mem_offset() -> VirtAddr {
+    VirtAddr::new(PHYS_MEM_OFFSET.load(Ordering::SeqCst))
+}
 
 /// Инициализирует [`OffsetPageTable`] над активной иерархией таблиц.
 ///
@@ -48,8 +59,56 @@ use x86_64::{
 /// фичей `map_physical_memory`). Два живых `&mut` на одну и ту же таблицу нарушили
 /// бы алиасинг-инварианты Rust и могли бы повредить память.
 pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static> {
+    // Запоминаем оффсет глобально: uaccess (M6d1) проверяет указатели пользователя через
+    // [`user_range_accessible`], которому нужно обойти активную таблицу без проброса оффсета.
+    PHYS_MEM_OFFSET.store(physical_memory_offset.as_u64(), Ordering::SeqCst);
     let level_4_table = active_level_4_table(physical_memory_offset);
     OffsetPageTable::new(level_4_table, physical_memory_offset)
+}
+
+/// Доступен ли пользователю весь диапазон `[start, start+len)` в **активном** адресном
+/// пространстве: каждая его страница present и помечена `USER_ACCESSIBLE` (а при
+/// `need_write` — ещё и `WRITABLE`). Это «предпроверка» для [`crate::syscall::uaccess`]:
+/// вместо того чтобы упасть в page fault на кривом пользовательском указателе (и уронить
+/// ядро), мы заранее проверяем отображение и возвращаем `-EFAULT`.
+///
+/// Корректно на одном ядре: системный вызов идёт с `IF=0`, поэтому между проверкой и
+/// доступом активную таблицу под нами никто не изменит (на SMP понадобился бы иной приём —
+/// например, fault-fixup / extable; см. HARDENING.md).
+pub fn user_range_accessible(start: u64, len: u64, need_write: bool) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let Some(end) = start.checked_add(len) else {
+        return false; // переполнение диапазона
+    };
+    let offset = phys_mem_offset();
+
+    // SAFETY: оффсет сохранён в `init`; во время syscall (IF=0) активная таблица стабильна и
+    // другого живого `OffsetPageTable` не существует — единственная `&mut` на L4 на время
+    // вызова. Маппер используется только для чтения (трансляции).
+    let mapper = unsafe {
+        let level_4_table = active_level_4_table(offset);
+        OffsetPageTable::new(level_4_table, offset)
+    };
+
+    // Проверяем каждую страницу, покрывающую диапазон.
+    let mut addr = start & !0xFFF;
+    while addr < end {
+        match mapper.translate(VirtAddr::new(addr)) {
+            TranslateResult::Mapped { flags, .. } => {
+                if !flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+                    return false; // отображена, но это память ядра — не отдаём
+                }
+                if need_write && !flags.contains(PageTableFlags::WRITABLE) {
+                    return false; // запись в read-only пользовательскую страницу
+                }
+            }
+            _ => return false, // не отображена / битый адрес
+        }
+        addr += 4096;
+    }
+    true
 }
 
 /// Возвращает `&mut` на таблицу страниц во фрейме `frame`, доступную по оффсету
