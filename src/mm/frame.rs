@@ -16,21 +16,37 @@
 //! нужны только регионы типа [`MemoryRegionType::Usable`] — из них и нарезаем
 //! фреймы по 4 КиБ.
 //!
-//! Эта реализация — простейшая (как в blog_os): храним индекс `next` и при каждом
-//! запросе пересчитываем итератор свободных фреймов и берём `next`-й. Это O(n) на
-//! аллокацию и фреймы не возвращаются обратно — для bring-up M3 нормально; реальный
-//! аллокатор (bitmap/buddy) и освобождение придут позже (см. `docs/HARDENING.md`).
+//! Эта реализация — простая (как в blog_os): храним курсор `next` и при каждом запросе
+//! пересчитываем итератор свободных фреймов. **Освобождение** (M6e1, фаза зрелости): к
+//! курсору добавлен интрузивный список свободных фреймов — `deallocate_frame` кладёт фрейм
+//! в список, `allocate_frame` сперва берёт оттуда. «Интрузивный» = адрес следующего
+//! свободного фрейма храним прямо в первых 8 байтах освобождённого фрейма (читаем/пишем по
+//! `phys + phys_mem_offset`), поэтому списку не нужна куча. O(n) на bump-аллокацию и
+//! отсутствие коалесинга/буддиси — это в HARDENING.md.
 
 use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
 use x86_64::{
-    structures::paging::{FrameAllocator, PhysFrame, Size4KiB},
+    structures::paging::{FrameAllocator, FrameDeallocator, PhysFrame, Size4KiB},
     PhysAddr,
 };
+
+/// Сентинел «конца списка» свободных фреймов: физический адрес 0 не бывает usable-фреймом
+/// (нижняя память зарезервирована), поэтому 0 в поле-ссылке означает «дальше пусто».
+const FREE_LIST_END: u64 = 0;
 
 /// Выдаёт свободные физические фреймы, читая карту памяти от bootloader.
 pub struct BootInfoFrameAllocator {
     memory_map: &'static MemoryMap,
     next: usize,
+    /// Голова интрузивного списка освобождённых фреймов (LIFO). `None` — список пуст, тогда
+    /// `allocate_frame` нарезает новый фрейм курсором `next`.
+    free_list: Option<PhysAddr>,
+}
+
+/// Виртуальный указатель на первое слово фрейма `addr` (там храним ссылку «следующий
+/// свободный»). Доступ — через отображение всей физпамяти (`virt = phys + offset`).
+fn link_word(addr: PhysAddr) -> *mut u64 {
+    (crate::mm::paging::phys_mem_offset() + addr.as_u64()).as_mut_ptr::<u64>()
 }
 
 impl BootInfoFrameAllocator {
@@ -46,6 +62,7 @@ impl BootInfoFrameAllocator {
         BootInfoFrameAllocator {
             memory_map,
             next: 0,
+            free_list: None,
         }
     }
 
@@ -68,6 +85,10 @@ impl BootInfoFrameAllocator {
     /// Ищем первую серию из `count` соседних фреймов (адрес каждого = предыдущий + 4 КиБ)
     /// начиная с курсора. Фреймы до начала серии (если упёрлись в границу `Usable`-региона)
     /// пропускаются — они и так никогда не освобождаются (M3). `None`, если серии нет.
+    ///
+    /// Берёт фреймы ТОЛЬКО курсором (не из списка свободных): непрерывность из произвольного
+    /// LIFO-списка не собрать. Поэтому непрерывные выделения (virtqueue virtio) никогда не
+    /// возвращаются в оборот, а освобождённые одиночные фреймы не ломают будущую серию.
     pub fn allocate_contiguous(&mut self, count: usize) -> Option<PhysFrame> {
         if count == 0 {
             return None;
@@ -98,13 +119,42 @@ impl BootInfoFrameAllocator {
     }
 }
 
-// SAFETY: `usable_frames` берёт фреймы только из `Usable`-регионов карты памяти, а
-// растущий `next` гарантирует, что один и тот же фрейм не выдаётся дважды — то есть
-// контракт `FrameAllocator` (только уникальные неиспользуемые фреймы) соблюдён.
+// SAFETY: фреймы берутся либо из списка освобождённых (туда они попадают только через
+// `deallocate_frame`, т.е. больше никем не используются), либо из `Usable`-регионов по
+// растущему курсору `next` — один и тот же фрейм не выдаётся дважды. Контракт
+// `FrameAllocator` (только уникальные неиспользуемые фреймы) соблюдён.
 unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
+        // Сперва переиспользуем освобождённый фрейм (LIFO): голова списка — это фрейм,
+        // в первых 8 байтах которого лежит адрес следующего свободного.
+        if let Some(head) = self.free_list {
+            // SAFETY: `head` попал в список только через `deallocate_frame`, т.е. фрейм
+            // свободен и его первое слово — наша ссылка, записанная при освобождении.
+            let next = unsafe { core::ptr::read(link_word(head)) };
+            self.free_list = (next != FREE_LIST_END).then(|| PhysAddr::new(next));
+            return Some(PhysFrame::containing_address(head));
+        }
         let frame = self.usable_frames().nth(self.next);
         self.next += 1;
         frame
+    }
+}
+
+impl FrameDeallocator<Size4KiB> for BootInfoFrameAllocator {
+    /// Возвращает фрейм в список свободных (LIFO): записываем текущую голову в первое слово
+    /// фрейма и делаем его новой головой.
+    ///
+    /// # Safety
+    /// `frame` должен быть выдан этим аллокатором и больше нигде не использоваться
+    /// (не отображён, никем не читается/пишется) — иначе мы затрём чужие данные его первым
+    /// словом, а позже выдадим занятый фрейм (UB). Непрерывные серии (`allocate_contiguous`)
+    /// освобождать так нельзя — непрерывность не восстановится.
+    unsafe fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        let addr = frame.start_address();
+        let prev_head = self.free_list.map_or(FREE_LIST_END, |p| p.as_u64());
+        // SAFETY: фрейм только что освобождён вызывающим (его контракт) и отображён через
+        // оффсет физпамяти — первое слово можно эксклюзивно записать.
+        core::ptr::write(link_word(addr), prev_head);
+        self.free_list = Some(addr);
     }
 }
