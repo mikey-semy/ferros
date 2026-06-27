@@ -49,8 +49,12 @@ process reaping / polish still pending (needs a freeing frame allocator).
   - **M6c — Hand-rolled FAT32 read** (done). BPB → FAT → root dir → cluster chain → file
     bytes; reads a file off the disk. Test image is FAT32 (image grown to 64 MiB), created by
     `fatfs` as a build-only dependency; the kernel reader is hand-rolled.
-  - **M6d — VFS + file syscalls:** `open`/`read`/`close`/`lseek`, per-process fd table;
-    a user program reads a file from disk.
+  - **M6d — VFS + file syscalls** (split):
+    - **M6d1 — Fault-tolerant `uaccess`** (done). `with_user_bytes` pre-validates the user
+      range against the page tables → `-EFAULT` instead of a kernel panic on a bad pointer
+      (the consolidation trigger before user buffers proliferate in `read`).
+    - **M6d2 — VFS + file syscalls:** `open`/`read`/`close`/`lseek`, per-process fd table,
+      copy-to-user; a user program reads a file from disk.
 - **M7 — Shell.** init process, interactive shell, basic utilities, line editing.
 
 ## Tier D — A "real" OS

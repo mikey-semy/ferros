@@ -85,12 +85,17 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   reads `CR2` today (safe). When M5c extends it to inspect user memory, a fault *inside*
   the handler could recurse on the same stack — give `#PF` its own IST entry (like
   `#DF`) or keep the handler strictly memory-access-free.
-- **`uaccess` is not fault-tolerant (M5b).** `with_user_bytes` range-checks that the buffer
-  is in the user half (blocks "pass a kernel pointer"), but a *valid-looking but unmapped*
-  user pointer still faults → kernel panic today. Real `copy_from/to_user` needs a fault
-  fixup table (extable): the `#PF` handler recognises a fault inside a uaccess region and
-  returns `-EFAULT` instead of dying. Also `write` content capture (`LAST_WRITE_*`) is
-  test observability in the production path — drop it once there's a better test hook.
+- **`uaccess` fault-tolerance is pre-validation, not extable (M5b → addressed M6d1).**
+  `with_user_bytes` now (a) range-checks the user half *and* (b) walks the active page tables
+  (`mm::paging::user_range_accessible`) to confirm every page is present + `USER_ACCESSIBLE`
+  before the access, returning `-EFAULT` instead of faulting. This closes the
+  "valid-range-but-unmapped pointer panics the kernel" hole (and the `write(unmapped_ptr)`
+  DoS) on single-CPU, where syscalls run `IF=0` so the mapping can't change between check and
+  use. It is **not** the Linux-style fault-fixup (extable): it's two-pass (walk then copy)
+  and would race on SMP — a true extable (single-pass, restartable copy, `#PF` looks up the
+  faulting RIP) is the SMP/perf upgrade, still deferred. Also `write` content capture
+  (`LAST_WRITE_*`) is test observability in the production path — drop it once there's a
+  better test hook.
 - **No address-space teardown (M5c2).** `AddressSpace::new_sharing_kernel` allocates a PML4
   frame, and the process's user page-table subtree + page frames are never freed (the frame
   allocator never frees anyway — M3 item). Fine for the one-shot program; real process exit
@@ -114,12 +119,11 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   interrupts).
 - **User-fault termination is coarse, and only covers ring-3 *code* faults (M5c3b).** A
   #PF/#GP taken while executing in ring 3 now kills *the process* (not the kernel) via
-  `exit_current`, but: (a) no signal delivery (`SIGSEGV`), faulting-instruction reporting,
-  or core dump — just terminate + a serial line; and (b) a fault the **kernel** takes on a
-  user pointer inside a syscall (uaccess to a valid-range-but-unmapped address) is a ring-0
-  fault → still panics the kernel (the uaccess/extable item above). So a user can still DoS
-  the kernel via e.g. `write(1, unmapped_user_ptr, n)` until uaccess is fault-tolerant.
-  Both need the extable + a real process/signal model.
+  `exit_current`, but there's no signal delivery (`SIGSEGV`), faulting-instruction reporting,
+  or core dump — just terminate + a serial line. A real fault model (signals, `wait`-able
+  status) comes with a process model. (The separate hole — a *kernel* fault on a user pointer
+  inside a syscall, e.g. `write(1, unmapped_ptr, n)` — is **fixed in M6d1**: `uaccess`
+  pre-validates the mapping and returns `-EFAULT`; see the uaccess item above.)
 - **Scheduler now carries an arch `PhysFrame` (CR3).** `sched::thread::Thread` holds
   `Option<PhysFrame>` and the switch goes through `arch::context::switch_task`; the data type
   leaks x86_64 into the portable scheduler. A neutral "address-space handle" is a later seam.
