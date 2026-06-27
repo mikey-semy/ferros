@@ -112,8 +112,10 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   with IF=0 (non-preemptible, non-reentrant), but a blocking/yielding syscall or SMP needs a
   per-task syscall stack (the per-task kernel stack / rsp0 already exists for ring-3
   interrupts).
-- **User faults still panic the kernel (M5c3a).** A #PF/#GP from ring 3 panics rather than
-  terminating just the offending process — M5c3b routes user faults to `exit_current`.
+- **User-fault termination is coarse (M5c3b).** A ring-3 #PF/#GP now kills *the process*
+  (not the kernel) via `exit_current`, but there's no signal delivery (`SIGSEGV`), no
+  faulting-instruction reporting to a parent, and no core-dump — just terminate + a serial
+  line. Real fault handling (signals, `wait`-able exit status) comes with a process model.
 - **Scheduler now carries an arch `PhysFrame` (CR3).** `sched::thread::Thread` holds
   `Option<PhysFrame>` and the switch goes through `arch::context::switch_task`; the data type
   leaks x86_64 into the portable scheduler. A neutral "address-space handle" is a later seam.

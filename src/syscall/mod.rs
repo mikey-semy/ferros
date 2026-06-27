@@ -42,6 +42,9 @@ pub static LAST_WRITE_USER_RSP: AtomicU64 = AtomicU64::new(0);
 pub static LAST_EXIT_CODE: AtomicI64 = AtomicI64::new(-1);
 /// Сколько раз вызывался `exit`/`exit_group` (тест проверяет, что завершение случилось).
 pub static EXIT_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Сколько пользовательских процессов было завершено из-за сбоя в кольце 3 (page fault /
+/// general protection fault). Тест M5c3b проверяет, что сбой убивает процесс, а не ядро.
+pub static USER_FAULT_KILLS: AtomicU64 = AtomicU64::new(0);
 
 /// Диспетчер системных вызовов: по номеру `nr` (Linux x86-64) направляет в обработчик.
 /// `args` уже разложены по Linux-ABI: `[rdi, rsi, rdx, r10, r8, r9]`. `user_rsp` —

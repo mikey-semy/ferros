@@ -15,6 +15,12 @@ publish = false
 name = "hello"
 path = "src/main.rs"
 
+# Программа-«фолтер» (M5c3b): намеренно падает в кольце 3 — для проверки, что ядро
+# завершает процесс, а не падает само.
+[[bin]]
+name = "faulter"
+path = "src/faulter.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"
