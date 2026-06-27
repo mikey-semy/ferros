@@ -83,4 +83,49 @@ fn main() {
         );
         println!("cargo:rustc-env={env}={}", elf.display());
     }
+
+    generate_disk_image(&manifest);
+}
+
+/// Создаёт raw-образ диска для virtio-blk (M6a): тесту перечисления PCI нужно подключённое
+/// устройство, а M6b прочитает сектор 0 и сверит сигнатуру. Образ — `target/ferros-disk.img`
+/// (путь относительно корня воркспейса, где QEMU и запускается; `target/` в .gitignore).
+///
+/// Идемпотентно: не переписываем, если образ уже нужного размера и с нашей сигнатурой.
+fn generate_disk_image(manifest: &str) {
+    const DISK_SIZE: u64 = 4 * 1024 * 1024; // 4 МиБ
+    const SIGNATURE: &[u8] = b"FERROSM6"; // 8 байт в начале сектора 0
+
+    let disk = PathBuf::from(manifest)
+        .join("target")
+        .join("ferros-disk.img");
+    if disk_image_current(&disk, DISK_SIZE, SIGNATURE) {
+        return;
+    }
+
+    let mut image = vec![0u8; DISK_SIZE as usize];
+    image[..SIGNATURE.len()].copy_from_slice(SIGNATURE);
+    // Заметный паттерн в остатке сектора 0 — чтобы M6b проверял не только сигнатуру.
+    for (i, byte) in image[SIGNATURE.len()..512].iter_mut().enumerate() {
+        *byte = (i as u8).wrapping_mul(3).wrapping_add(1);
+    }
+
+    if let Some(parent) = disk.parent() {
+        std::fs::create_dir_all(parent).expect("failed to create target dir for disk image");
+    }
+    std::fs::write(&disk, &image).expect("failed to write ferros-disk.img");
+}
+
+/// Уже ли на месте диск-образ нужного размера с нашей сигнатурой в начале.
+fn disk_image_current(path: &std::path::Path, size: u64, signature: &[u8]) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    match file.metadata() {
+        Ok(meta) if meta.len() == size => {}
+        _ => return false,
+    }
+    let mut head = [0u8; 8];
+    file.read_exact(&mut head).is_ok() && head.starts_with(signature)
 }

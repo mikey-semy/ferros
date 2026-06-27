@@ -113,3 +113,20 @@ higher-value step for the D8 north star (it's exactly how relibc/real programs w
 so it goes first. The two parts compose cleanly later: the ELF loader already takes a
 mapper, so pointing it at a per-process `AddressSpace` is a small change. ELF parser is
 **hand-rolled** (no new dependency) — minimal-deps + teach-as-we-go.
+
+## D11 — Storage path: PCI + virtio-blk + hand-rolled FAT
+
+**Decision:** For M6 storage, use a **virtio-blk** disk driver (over **ATA PIO** and AHCI),
+which makes **minimal PCI bus enumeration** the prerequisite first step (M6a); read the
+filesystem with a **hand-rolled FAT** reader (over a crate like `fatfs`, and over ext2).
+Start read-only. Decomposition: M6a PCI enumeration → M6b legacy virtio-blk (read sectors)
+→ M6c FAT read → M6d VFS + file syscalls.
+**Why:** virtio is the modern, fast, well-specified device QEMU emulates cleanly; it is the
+same family we'll want for networking (virtio-net, M8), so the PCI + virtqueue groundwork
+pays off twice. ATA PIO would have been simpler (no PCI), but virtio better matches a
+"build to last" kernel and the eventual real-hardware story. PCI enumeration is small and
+reusable (every PCI device needs it). FAT is hand-rolled for the same reasons as the ELF
+loader (D10): no dependency, full control, teach-as-we-go; FAT (not ext2) because it is the
+simplest real filesystem to read and the roadmap's stated starting point. The **arch seam**
+(CONVENTIONS §1) splits the PCI driver: the x86-specific config mechanism (ports 0xCF8/0xCFC)
+lives in `arch/x86_64/pci.rs`; the portable device model + enumeration in `drivers/pci.rs`.

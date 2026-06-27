@@ -21,7 +21,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
-use ferros::drivers::keyboard;
+use ferros::drivers::{keyboard, pci};
 use ferros::mm::frame::BootInfoFrameAllocator;
 use ferros::sched::executor::Executor;
 use ferros::sched::{thread, Task};
@@ -90,6 +90,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // M4c: очередь скан-кодов клавиатуры (после кучи — она аллоцирует буфер).
     keyboard::init();
+
+    // M6a: перечисляем шину PCI и печатаем устройства в serial (нужна куча — список в Vec).
+    // Видно хост-мост i440fx и подключённый диск virtio-blk — фундамент для M6b.
+    pci::init();
 
     // Динамические аллокации поверх кучи: Box (одно значение) и Vec (растущий массив).
     let boxed = Box::new(42);
