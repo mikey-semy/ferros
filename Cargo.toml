@@ -48,11 +48,20 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc"]
 
 [package.metadata.bootimage]
 # Тестовый режим QEMU: устройство isa-debug-exit (ядро само завершит QEMU кодом
-# успех/провал), вывод тестов в serial → stdio, без окна.
+# успех/провал), вывод тестов в serial → stdio, без окна. С M6a подключаем второй диск
+# через контроллер virtio-blk (PCI): отдельный `-drive if=none` + `-device`, чтобы не
+# конфликтовать с загрузочным диском (его bootimage даёт первым). Образ создаёт build.rs.
 test-args = [
     "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
     "-serial", "stdio",
     "-display", "none",
+    "-drive", "if=none,id=disk0,format=raw,file=target/ferros-disk.img",
+    "-device", "virtio-blk-pci,drive=disk0",
+]
+# Те же аргументы для обычного `cargo run` (bootimage добавляет их к команде запуска).
+run-args = [
+    "-drive", "if=none,id=disk0,format=raw,file=target/ferros-disk.img",
+    "-device", "virtio-blk-pci,drive=disk0",
 ]
 # Код выхода QEMU при успехе: (0x10 << 1) | 1 = 33.
 test-success-exit-code = 33

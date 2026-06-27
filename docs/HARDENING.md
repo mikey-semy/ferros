@@ -141,6 +141,33 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   no relocations, no dynamic linking, no segment-overlap/`p_align` validation beyond
   page-dedup. Fine for our own embedded binary; real/untrusted binaries need a fuller loader.
 
+## M6 — storage + filesystem
+
+- **Brute-force PCI scan, no bridges/PCIe ECAM (M6a).** `pci::enumerate` probes all
+  256 buses × 32 slots (× 8 funcs when multifunction) via the legacy 0xCF8/0xCFC mechanism.
+  Fine on QEMU's flat i440fx bus, but it doesn't recurse through PCI-to-PCI bridges
+  (`config_read` of a bus behind an unconfigured bridge returns `0xFFFF`), ignores PCIe
+  extended config (MMIO ECAM, offsets ≥ 0x100), and re-scans the whole bus on every `find`.
+  A real enumerator walks bridges, caches devices, and supports ECAM.
+- **No BAR sizing / remapping (M6a).** `PciDevice::bar` decodes the BARs the firmware already
+  programmed; it never sizes a BAR (write all-ones, read back the mask) or assigns addresses.
+  QEMU pre-assigns them, so reading is enough for virtio (M6b); a from-scratch resource
+  allocator is a later concern.
+- **No safe BAR iterator (64-bit caveat) (M6a).** `PciDevice::bar(i)` decodes a single 64-bit
+  BAR correctly (it combines slot `i`+`i+1`), but there's no iterator that *skips* the high
+  half — naively walking `bar(0..6)` on a device with a 64-bit memory BAR misreads its high
+  dword as a spurious separate BAR. No caller iterates today (virtio uses only `bar(0)`, an
+  I/O BAR); add a proper `bars()` iterator when M6c+ first drives an MMIO device.
+- **No bus-master enable / MSI yet (M6a).** `config_write_u32` exists but M6a doesn't touch
+  the command register; M6b will set bus-master (offset 0x04 bit 2) for virtio DMA. No
+  MSI/MSI-X — virtio will be polled, not interrupt-driven, to start.
+- **virtio device assumptions (M6a).** The test pins the *transitional legacy* virtio-blk id
+  `1af4:1001` with a port-I/O BAR0; a modern-only device (`disable-legacy=on`, id `1af4:1042`,
+  MMIO BARs) would need the modern capability-based path. Single virtio-blk device assumed.
+- **Disk image is a build artifact, not a fixture (M6a).** `build.rs` generates a 4 MiB raw
+  `target/ferros-disk.img` with a known signature; it's regenerated on size/signature
+  mismatch only. M6c will format it as FAT (likely via a host-side `fatfs` build-dependency).
+
 ## Cross-cutting (whole kernel)
 
 - **No real-hardware validation** — QEMU only until M11 (UEFI + real drivers).
