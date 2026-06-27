@@ -130,3 +130,10 @@ loader (D10): no dependency, full control, teach-as-we-go; FAT (not ext2) becaus
 simplest real filesystem to read and the roadmap's stated starting point. The **arch seam**
 (CONVENTIONS §1) splits the PCI driver: the x86-specific config mechanism (ports 0xCF8/0xCFC)
 lives in `arch/x86_64/pci.rs`; the portable device model + enumeration in `drivers/pci.rs`.
+
+**Refinement (M6c):** the FAT variant is **FAT32** (the roadmap's choice), so the test disk
+image grew from 4 MiB to 64 MiB (FAT32 needs ≥65525 clusters). The kernel's reader is
+hand-rolled (read-only, 8.3 names), but the test **image** is created with the `fatfs` crate
+as a **`[build-dependencies]`** entry — a host-only tool in `build.rs` that formats the image
+and writes a test file. `fatfs` is therefore *not* a kernel/runtime dependency: we only use a
+trusted tool to produce a fixture, while still learning to *read* FAT by hand.

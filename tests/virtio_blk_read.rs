@@ -1,12 +1,13 @@
 //! Интеграционный тест M6b: читаем сектор 0 диска virtio-blk и сверяем сигнатуру.
 //!
-//! `build.rs` создаёт образ диска (`target/ferros-disk.img`) с сигнатурой `FERROSM6` в
-//! начале сектора 0; QEMU подключает его как virtio-blk (`Cargo.toml`). `main` поднимает
-//! драйвер, читает сектор 0 и сверяет первые 8 байт. Проверка идёт в `main` (нужен
-//! аллокатор фреймов), результат — в статиках, а `#[test_case]` их утверждает.
+//! `build.rs` форматирует образ диска (`target/ferros-disk.img`) как FAT32; QEMU подключает
+//! его как virtio-blk (`Cargo.toml`). `main` поднимает драйвер, читает сектор 0 (это
+//! загрузочный сектор FAT) и сверяет сигнатуру `0x55AA` в его конце. Проверка идёт в `main`
+//! (нужен аллокатор фреймов), результат — в статиках, а `#[test_case]` их утверждает.
 //!
 //! Почему это доказательство: если бы virtqueue/DMA/опрос были настроены неверно, чтение
-//! зависло бы (таймаут) или вернуло мусор/ошибку, и сигнатура бы не совпала.
+//! зависло бы (таймаут) или вернуло мусор, и сигнатура загрузсектора бы не совпала. (Разбор
+//! самого FAT проверяет отдельный тест `fat_read`.)
 
 #![no_std]
 #![no_main]
@@ -30,7 +31,7 @@ entry_point!(main);
 static INIT_OK: AtomicBool = AtomicBool::new(false);
 /// Чтение сектора 0 завершилось успешно.
 static READ_OK: AtomicBool = AtomicBool::new(false);
-/// Первые 8 байт сектора 0 совпали с сигнатурой из build.rs.
+/// Сектор 0 оканчивается сигнатурой загрузочного сектора 0x55AA (это валидный boot sector).
 static SIGNATURE_OK: AtomicBool = AtomicBool::new(false);
 
 fn main(boot_info: &'static BootInfo) -> ! {
@@ -47,7 +48,9 @@ fn main(boot_info: &'static BootInfo) -> ! {
         let mut sector = [0u8; SECTOR_SIZE];
         if virtio_blk::read_sector(0, &mut sector).is_ok() {
             READ_OK.store(true, Ordering::SeqCst);
-            SIGNATURE_OK.store(&sector[..8] == b"FERROSM6", Ordering::SeqCst);
+            // Любой загрузочный сектор FAT оканчивается сигнатурой 0x55 0xAA.
+            let boot_signature_ok = sector[510] == 0x55 && sector[511] == 0xAA;
+            SIGNATURE_OK.store(boot_signature_ok, Ordering::SeqCst);
         }
     }
 
@@ -69,12 +72,12 @@ fn virtio_blk_initialized() {
     );
 }
 
-/// Чтение сектора 0 прошло, и в нём — сигнатура `FERROSM6` из образа диска (build.rs).
+/// Чтение сектора 0 прошло, и это валидный загрузочный сектор FAT (сигнатура 0x55AA).
 #[test_case]
-fn reads_sector_zero_signature() {
+fn reads_boot_sector() {
     assert!(READ_OK.load(Ordering::SeqCst), "read_sector(0) failed");
     assert!(
         SIGNATURE_OK.load(Ordering::SeqCst),
-        "sector 0 did not start with the expected FERROSM6 signature"
+        "sector 0 is not a valid boot sector (missing 0x55AA signature)"
     );
 }
