@@ -25,7 +25,7 @@ use crate::mm::addr_space::AddressSpace;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 use x86_64::instructions::interrupts;
 use x86_64::structures::paging::PhysFrame;
@@ -36,6 +36,10 @@ const STACK_SIZE: usize = 4096 * 4;
 /// Включено ли вытеснение по таймеру. Пока `false`, обработчик таймера только считает
 /// тики и не трогает потоки (поведение M2–M4d). Взводится [`start_preemption`].
 static PREEMPTION_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Раздатчик идентификаторов процессов (PID, M6f1). PID 0 закреплён за «нулевым» потоком
+/// ядра; пользовательские процессы и потоки ядра получают 1, 2, … .
+static NEXT_PID: AtomicU32 = AtomicU32::new(1);
 
 /// Состояние потока в планировщике.
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -54,6 +58,15 @@ enum State {
 /// Контекст потока: сохранённый указатель стека плюс владение его памятью; для
 /// пользовательских процессов — ещё адресное пространство и стек ядра.
 struct Thread {
+    /// Идентификатор процесса (M6f1). 0 — «нулевой» поток ядра.
+    pid: u32,
+    /// PID родителя (кто создал этот поток/процесс). 0 — создан ядром на старте. Пишется
+    /// сейчас, читается `wait` (2a4) — отсюда `allow(dead_code)` до тех пор.
+    #[allow(dead_code)]
+    parent: u32,
+    /// Код завершения (`exit`); `None`, пока поток жив. Пишется сейчас, читается `wait` (2a4).
+    #[allow(dead_code)]
+    exit_status: Option<i32>,
     /// Сохранённый `rsp` потока (в его ядровом стеке). Обновляется при переключении прочь.
     rsp: u64,
     /// Память стека (ядрового). `None` у «нулевого» потока — он на стеке ядра от загрузчика.
@@ -88,6 +101,9 @@ pub fn init() {
         let mut guard = SCHEDULER.lock();
         *guard = Some(Scheduler {
             threads: vec![Thread {
+                pid: 0, // «нулевой» поток ядра — PID 0
+                parent: 0,
+                exit_status: None,
                 rsp: 0,
                 stack: None,
                 cr3: None,
@@ -116,7 +132,11 @@ pub fn spawn(entry: extern "C" fn() -> !) {
     // размера; `entry` имеет тип `-> !` и не вернётся.
     let rsp = unsafe { context::init_thread_stack(top, entry) };
 
+    let parent = current_pid();
     push_thread(Thread {
+        pid: NEXT_PID.fetch_add(1, Ordering::SeqCst),
+        parent,
+        exit_status: None,
         rsp,
         stack: Some(stack),
         cr3: None,
@@ -132,13 +152,27 @@ pub fn spawn(entry: extern "C" fn() -> !) {
 ///
 /// [`spawn_user`]: crate::arch::x86_64::syscall::spawn_user
 pub fn add_user_task(rsp: u64, cr3: PhysFrame, kernel_stack_top: u64, kstack: Box<[u8]>) {
+    let parent = current_pid();
     push_thread(Thread {
+        pid: NEXT_PID.fetch_add(1, Ordering::SeqCst),
+        parent,
+        exit_status: None,
         rsp,
         stack: Some(kstack),
         cr3: Some(cr3),
         kernel_stack_top,
         state: State::Runnable,
     });
+}
+
+/// PID текущего процесса/потока. 0, если планировщик ещё не инициализирован.
+pub fn current_pid() -> u32 {
+    interrupts::without_interrupts(|| {
+        SCHEDULER
+            .lock()
+            .as_ref()
+            .map_or(0, |s| s.threads[s.current].pid)
+    })
 }
 
 /// Добавляет поток в планировщик (с выключенными прерываниями — тот же замок берёт таймер).
@@ -168,13 +202,14 @@ pub fn stop_preemption() {
 /// # Panics
 /// Если нет ни одного другого готового потока (так быть не должно — «нулевой» поток ядра
 /// всегда `Runnable`).
-pub fn exit_current() -> ! {
+pub fn exit_current(status: i32) -> ! {
     // Гарантируем IF=0 на всё завершение (switch_to_next переключает без сохранения IF).
     interrupts::disable();
     {
         let mut guard = SCHEDULER.lock();
         let sched = guard.as_mut().expect("scheduler not initialized");
         let cur = sched.current;
+        sched.threads[cur].exit_status = Some(status);
         sched.threads[cur].state = State::Dead;
     } // замок отпускаем здесь — switch_to_next возьмёт его снова
     switch_to_next();
