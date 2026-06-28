@@ -36,7 +36,8 @@
 use crate::mm::paging::page_table_at;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{
-    FrameAllocator, FrameDeallocator, OffsetPageTable, PageTableFlags, PhysFrame, Size4KiB,
+    FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PageTableFlags, PhysFrame,
+    Size4KiB,
 };
 use x86_64::VirtAddr;
 
@@ -113,6 +114,53 @@ impl AddressSpace {
         AddressSpace { pml4_frame: frame }
     }
 
+    /// Создаёт **копию** адресного пространства `parent_pml4` для `fork` (M6f3): новое
+    /// пространство с общей памятью ядра, в которое СОДЕРЖИМОЕ каждой пользовательской страницы
+    /// родителя скопировано в свежий фрейм (прямое копирование, без COW — см. HARDENING).
+    ///
+    /// Это «зеркало» [`Self::destroy`]: тот обходит приватное поддерево, освобождая фреймы; этот
+    /// — обходит его, копируя каждый лист и отображая копию в ребёнка по тому же виртуальному
+    /// адресу. Работает через `phys_offset` (активным быть не обязано), `CR3` не трогает.
+    ///
+    /// # Safety
+    /// `parent_pml4` — корень валидного пространства (его пользовательские листья доступны из
+    /// кольца 3); `kernel_pml4` — корень таблиц ядра; `phys_offset` — корректный оффсет
+    /// физпамяти. При нехватке фреймов паникует (как и остальной аллокатор ядра — см. HARDENING).
+    pub unsafe fn fork_from(
+        parent_pml4: PhysFrame,
+        phys_offset: VirtAddr,
+        kernel_pml4: PhysFrame,
+        fa: &mut impl FrameAllocator<Size4KiB>,
+    ) -> AddressSpace {
+        // SAFETY: копируем ядровую таблицу (как при любом создании пространства).
+        let child = unsafe { AddressSpace::new_sharing_kernel(phys_offset, kernel_pml4, fa) };
+
+        // Пользовательские L4-слоты родителя: present и отличные от ядра (у нас это слот 255).
+        // SAFETY: parent/kernel — настоящие таблицы (разные фреймы), доступны по phys_offset.
+        let parent = unsafe { page_table_at(parent_pml4, phys_offset) };
+        let kernel = unsafe { page_table_at(kernel_pml4, phys_offset) };
+        // SAFETY: ребёнок только что создан, другого живого маппера на него нет.
+        let mut child_mapper = unsafe { child.mapper(phys_offset) };
+
+        for i in 0..512 {
+            if !parent[i].flags().contains(PageTableFlags::PRESENT) {
+                continue;
+            }
+            let shared = kernel[i].flags().contains(PageTableFlags::PRESENT)
+                && kernel[i].addr() == parent[i].addr();
+            if shared {
+                continue;
+            }
+            if let Ok(l3) = parent[i].frame() {
+                let va_base = (i as u64) << 39;
+                // SAFETY: l3 — приватное поддерево L3 родителя; копируем его листья в ребёнка.
+                unsafe { copy_subtree(l3, 3, va_base, phys_offset, &mut child_mapper, fa) };
+            }
+        }
+
+        child
+    }
+
     /// Освобождает **только приватное (пользовательское) поддерево** этого пространства и сам
     /// фрейм PML4, возвращая фреймы аллокатору. Общие с ядром L4-записи (скопированные при
     /// создании) НЕ трогает — иначе повредили бы ядро и другие процессы.
@@ -156,6 +204,69 @@ impl AddressSpace {
 
         // SAFETY: поддеревья освобождены; PML4 неактивен и больше не нужен.
         unsafe { fa.deallocate_frame(self.pml4_frame) };
+    }
+}
+
+/// Рекурсивно КОПИРУЕТ поддерево таблиц родителя (уровень `level`: 3=L3, 2=L2, 1=L1),
+/// отображая копию каждой листовой страницы в ребёнка (`child_mapper`) по тому же виртуальному
+/// адресу. `va_base` — виртуальный адрес, набранный из индексов вышестоящих уровней.
+///
+/// # Safety
+/// `frame` — таблица уровня `level` приватного поддерева родителя, доступна по `phys_offset`;
+/// `child_mapper` маппит в пространство ребёнка. При нехватке фреймов паникует.
+unsafe fn copy_subtree(
+    frame: PhysFrame,
+    level: u8,
+    va_base: u64,
+    phys_offset: VirtAddr,
+    child_mapper: &mut OffsetPageTable,
+    fa: &mut impl FrameAllocator<Size4KiB>,
+) {
+    // SAFETY: frame — настоящая таблица, доступна по phys_offset; единственная ссылка.
+    let table = unsafe { page_table_at(frame, phys_offset) };
+    let shift = 12 + 9 * (level as u64 - 1); // L1→12, L2→21, L3→30
+    for i in 0..512 {
+        let entry = &table[i];
+        if !entry.flags().contains(PageTableFlags::PRESENT) {
+            continue;
+        }
+        let va = va_base | ((i as u64) << shift);
+        if level == 1 {
+            // Лист — пользовательская страница: копируем содержимое в свежий фрейм ребёнка.
+            if let Ok(parent_leaf) = entry.frame() {
+                let child_leaf = fa
+                    .allocate_frame()
+                    .expect("out of frames for fork page copy");
+                // SAFETY: оба фрейма доступны по phys_offset; child_leaf только что выдан
+                // (уникален) → копирование не алиасит.
+                unsafe {
+                    let src = (phys_offset + parent_leaf.start_address().as_u64()).as_ptr::<u8>();
+                    let dst =
+                        (phys_offset + child_leaf.start_address().as_u64()).as_mut_ptr::<u8>();
+                    core::ptr::copy_nonoverlapping(src, dst, 4096);
+                }
+                // Те же флаги, что у любой нашей пользовательской страницы (см. map_user_page):
+                // промежуточные таблицы map_to сам делает USER_ACCESSIBLE.
+                let flags = PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::USER_ACCESSIBLE;
+                let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
+                // SAFETY: child_leaf уникален; va — в приватном (пустом) поддереве ребёнка.
+                unsafe {
+                    child_mapper
+                        .map_to(page, child_leaf, flags, fa)
+                        .expect("fork: map child page")
+                        .flush();
+                }
+            }
+        } else if let Ok(child_tbl) = entry.frame() {
+            debug_assert!(
+                !entry.flags().contains(PageTableFlags::HUGE_PAGE),
+                "huge pages are not supported in fork"
+            );
+            // SAFETY: child_tbl — дочерняя таблица приватного поддерева родителя.
+            unsafe { copy_subtree(child_tbl, level - 1, va, phys_offset, child_mapper, fa) };
+        }
     }
 }
 

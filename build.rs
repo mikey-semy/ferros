@@ -23,6 +23,7 @@ fn main() {
         "src/reader.rs",
         "src/getpidtest.rs",
         "src/exectest.rs",
+        "src/forktest.rs",
         "Cargo.toml",
         "Cargo.lock",
         "linker.ld",
@@ -40,6 +41,7 @@ fn main() {
         ("reader", "USER_READER_ELF"),
         ("getpidtest", "USER_GETPIDTEST_ELF"),
         ("exectest", "USER_EXECTEST_ELF"),
+        ("forktest", "USER_FORKTEST_ELF"),
     ];
 
     // Удаляем прошлые ELF перед сборкой: cargo не отслеживает linker.ld / target.json как

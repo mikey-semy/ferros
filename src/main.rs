@@ -146,6 +146,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         ferros::syscall::elf::HELLO_ELF,
         ferros::syscall::elf::READER_ELF,
         ferros::syscall::elf::EXECTEST_ELF, // M6f2: заменит себя `hello` через execve
+        ferros::syscall::elf::FORKTEST_ELF, // M6f3: форкнётся — два процесса завершатся
     ] {
         unsafe {
             ferros::arch::x86_64::syscall::spawn_user(elf, phys_mem_offset, &mut frame_allocator)

@@ -104,6 +104,12 @@ core::arch::global_asm!(
     "    push r15", // 16 push'ей суммарно → rsp 16-выровнен перед call
     "    mov rdi, rsp", // &mut SyscallRegs
     "    call {dispatch}",
+    // Эпилог восстановления и возврата в кольцо 3 — отдельная метка: на него же «приземляется»
+    // первое переключение на РЕБЁНКА fork (M6f3). Ребёнок стартует с подделанной копией
+    // SyscallRegs (rax=0) на своём ядровом стеке и проходит ровно этот же путь, поэтому
+    // восстанавливает ВЕСЬ регистровый контекст родителя — без дублирования логики.
+    ".global ferros_syscall_return",
+    "ferros_syscall_return:",
     "    pop r15",
     "    pop r14",
     "    pop r13",
@@ -128,6 +134,9 @@ core::arch::global_asm!(
 
 extern "C" {
     fn ferros_syscall_entry();
+    /// Эпилог `syscall` (восстановление SyscallRegs + `sysretq`); цель первого запуска ребёнка
+    /// fork — см. [`init_fork_child_stack`].
+    fn ferros_syscall_return();
 }
 
 /// Glue между голым трамплином и переносимым диспетчером: распаковывает [`SyscallRegs`],
@@ -145,6 +154,10 @@ extern "C" fn ferros_syscall_dispatch(regs: *mut SyscallRegs) {
     // остальные системные вызовы идут в переносимый диспетчер и лишь возвращают i64 в rax.
     if regs.rax == crate::syscall::abi::SYS_EXECVE {
         exec(regs, regs.rdi);
+        return;
+    }
+    if regs.rax == crate::syscall::abi::SYS_FORK {
+        fork(regs);
         return;
     }
     let args = [regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9];
@@ -261,6 +274,111 @@ fn exec(regs: &mut SyscallRegs, path_ptr: u64) {
     regs.r13 = 0;
     regs.r14 = 0;
     regs.r15 = 0;
+}
+
+/// `fork()` (M6f3): создаёт ребёнка — копию текущего процесса. У ребёнка СВОЁ адресное
+/// пространство (полная копия пользовательских страниц родителя), СВОЯ копия таблицы
+/// дескрипторов и СВОЙ ядровый стек. Ребёнок «возвращается» из этого же `fork` с `rax = 0`;
+/// родитель получает PID ребёнка. При ошибке (нет глобального аллокатора) — `-errno` родителю.
+///
+/// CR3 здесь не трогаем: копирование адресного пространства идёт через отображение физпамяти
+/// (`phys_offset`), а ребёнок начнёт исполняться в своём пространстве позже — планировщик
+/// переключит CR3 при первом переходе на его задачу.
+fn fork(regs: &mut SyscallRegs) {
+    use crate::syscall::abi;
+
+    let phys_offset = crate::mm::paging::phys_mem_offset();
+    let (parent_pml4, _) = Cr3::read();
+    let kernel_pml4 = crate::sched::thread::kernel_cr3();
+
+    // 1) Адресное пространство ребёнка = копия родительского (содержимое страниц копируется).
+    let child = crate::mm::frame::with_global(|fa| {
+        // SAFETY: parent_pml4 — активное (вызывающее) пространство; копируем его приватное
+        // поддерево в новое, копируя именно ядровую таблицу для общих с ядром записей.
+        unsafe { AddressSpace::fork_from(parent_pml4, phys_offset, kernel_pml4, fa) }
+    });
+    let child_pml4 = match child {
+        Some(a) => a.pml4_frame(),
+        None => {
+            // Глобальный аллокатор не установлен (fork до загрузки ядра) — не должно быть.
+            regs.rax = (-abi::ENOMEM) as u64;
+            return;
+        }
+    };
+
+    // 2) Таблица дескрипторов ребёнка = копия родительской (открытые файлы переживают fork).
+    crate::syscall::files::fork_fds(
+        parent_pml4.start_address().as_u64(),
+        child_pml4.start_address().as_u64(),
+    );
+
+    // 3) Ядровый стек ребёнка: первое переключение уведёт в кольцо 3 в ту же точку, откуда
+    //    родитель звал `fork`, со ВСЕМ его регистровым контекстом, но с rax=0.
+    let mut kstack = alloc::vec![0u8; USER_KERNEL_STACK_SIZE].into_boxed_slice();
+    let ktop = (kstack.as_mut_ptr() as usize + kstack.len()) & !0xF;
+    // SAFETY: `ktop` — вершина свежего выровненного ядрового стека; сохранённые в `regs`
+    // rip/user_rsp указывают в отображённую кольцо-3 память пространства РЕБЁНКА (копию роди-
+    // тельской — те же VA, своё содержимое).
+    let rsp = unsafe { init_fork_child_stack(ktop as *mut u8, regs) };
+
+    // 4) Регистрируем ребёнка (parent = текущий PID) и возвращаем его PID родителю.
+    let child_pid = crate::sched::thread::add_user_task(rsp, child_pml4, ktop as u64, kstack);
+    regs.rax = child_pid as u64;
+}
+
+/// Готовит ядровый стек ребёнка `fork` (M6f3): первое переключение `switch_context` снимет 6
+/// нулевых callee-saved и `ret`-нёт в эпилог [`ferros_syscall_return`], а тот восстановит
+/// ПОДДЕЛАННУЮ копию [`SyscallRegs`] родителя (с `rax = 0`) и `sysretq`-нёт в кольцо 3: ребёнок
+/// «возвращается» из того же `fork`, что и родитель, получая 0 и весь его регистровый контекст.
+/// Возвращает начальный `rsp` (в ядровом стеке ребёнка).
+///
+/// Раскладка (от старших адресов к младшим): сверху — копия `SyscallRegs` в ТОМ ЖЕ порядке,
+/// что кладёт входной трамплин (`user_rsp` старшим … `r15` младшим); под ней — кадр
+/// `switch_context` (`[ferros_syscall_return][rbp=0][rbx=0][r12=0][r13=0][r14=0][r15=0]`).
+///
+/// # Safety
+/// `kstack_top` — вершина свежего, выровненного по 16 байт ядрового стека (≥ 23 слов).
+/// Сохранённые в `parent` `rip`/`user_rsp` указывают в отображённую кольцо-3 память РЕБЁНКА.
+unsafe fn init_fork_child_stack(kstack_top: *mut u8, parent: &SyscallRegs) -> u64 {
+    let mut sp = kstack_top as *mut u64;
+    let mut push = |value: u64| {
+        // SAFETY: sp идёт вниз по выделенному ядровому стеку достаточного размера.
+        unsafe {
+            sp = sp.sub(1);
+            sp.write(value);
+        }
+    };
+
+    // Копия SyscallRegs в порядке push входного трамплина (user_rsp старшим … r15 младшим).
+    // Единственное отличие от родителя — rax = 0 (значение, которое fork() вернёт ребёнку).
+    push(parent.user_rsp);
+    push(0); // rax = 0 (ребёнок)
+    push(parent.rip);
+    push(parent.rflags);
+    push(parent.rdi);
+    push(parent.rsi);
+    push(parent.rdx);
+    push(parent.r10);
+    push(parent.r8);
+    push(parent.r9);
+    push(parent.rbx);
+    push(parent.rbp);
+    push(parent.r12);
+    push(parent.r13);
+    push(parent.r14);
+    push(parent.r15);
+
+    // Кадр switch_context: адрес возврата (ret → эпилог), затем 6 нулевых callee-saved —
+    // их switch_context снимет (pop r15,r14,r13,r12,rbx,rbp), после чего ret уйдёт в эпилог.
+    push(ferros_syscall_return as *const () as u64);
+    push(0); // rbp
+    push(0); // rbx
+    push(0); // r12
+    push(0); // r13
+    push(0); // r14
+    push(0); // r15
+
+    sp as u64
 }
 
 /// Размер стека ядра под обработку `syscall` (5 страниц по 4 КиБ).

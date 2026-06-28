@@ -43,7 +43,10 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   neighbours. Add unmapped guard pages.
 - **`create_example_mapping` is demo-only.** It maps an arbitrary page to the VGA frame
   via an unchecked `map_to` — a teaching one-shot, not a real mapping API.
-- **Fixed 100 KiB heap, no growth-on-demand.** Enlarge or grow dynamically later.
+- **Fixed 1 MiB heap, no growth-on-demand (raised from 100 KiB in M6f3).** The process model
+  holds control structures + each process's 16 KiB kernel stack on the heap, and fork/exec copy
+  address spaces and read ELFs — a handful of processes overran 100 KiB. Still a fixed size; grow
+  dynamically later.
 - **KASLR, SMEP/SMAP, huge pages, demand paging / copy-on-write** — none yet.
 - **Single global spinlock on the heap** — a contention point once we have SMP (no SMP
   yet, so moot for now).
@@ -229,6 +232,22 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   global `PROCESSES` `Mutex` while it `copy_to_user`s the data. Safe on single-CPU (syscalls
   run `IF=0`, no ISR touches the map), but on SMP this serialises all file I/O and a blocking
   copy under the lock would be bad. Pairs with the non-preemptible-syscall limitation.
+
+- **`fork` copies every page eagerly — no copy-on-write (M6f3).** `AddressSpace::fork_from`
+  allocates a fresh frame and `memcpy`s the contents of *every* user page of the parent. For a
+  large process this is slow and wasteful (the common case is fork-then-exec, which throws the
+  copy away). COW (share pages read-only, duplicate on write-fault) is the standard fix — needs a
+  write-fault handler and per-frame refcounts. Deferred.
+- **`fork`/`execve` panic on frame exhaustion instead of returning `-ENOMEM` (M6f3).** Building
+  the child/new address space goes through `new_sharing_kernel` / `map_to` / `fork_from`, all of
+  which `.expect()` on `allocate_frame` — like the rest of the kernel's allocators. Since fork/exec
+  are user-triggerable, OOM there *should* surface as `-ENOMEM` to the caller, not bring down the
+  kernel. Needs allocation-failure plumbing (the `None` arm already handles "allocator not
+  installed"; this is the genuine-exhaustion arm).
+- **`fork` is the whole `clone` surface (M6f3).** No `clone`/threads (`CLONE_VM` etc.), no
+  `vfork`, no `argv`/`envp` to the child beyond what's already in its copied memory. `fork` also
+  has no `wait` partner yet (M6f4): the child becomes `Dead` and the reaper frees it without the
+  parent collecting a status — zombies + `wait4` are next.
 
 ## Cross-cutting (whole kernel)
 

@@ -151,10 +151,11 @@ pub fn spawn(entry: extern "C" fn() -> !) {
 /// `kstack` — память этого стека (держим живой). Создаётся арх-слоем ([`spawn_user`]).
 ///
 /// [`spawn_user`]: crate::arch::x86_64::syscall::spawn_user
-pub fn add_user_task(rsp: u64, cr3: PhysFrame, kernel_stack_top: u64, kstack: Box<[u8]>) {
+pub fn add_user_task(rsp: u64, cr3: PhysFrame, kernel_stack_top: u64, kstack: Box<[u8]>) -> u32 {
     let parent = current_pid();
+    let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
     push_thread(Thread {
-        pid: NEXT_PID.fetch_add(1, Ordering::SeqCst),
+        pid,
         parent,
         exit_status: None,
         rsp,
@@ -163,6 +164,7 @@ pub fn add_user_task(rsp: u64, cr3: PhysFrame, kernel_stack_top: u64, kstack: Bo
         kernel_stack_top,
         state: State::Runnable,
     });
+    pid
 }
 
 /// Меняет адресное пространство (CR3) ТЕКУЩЕГО потока на `new` и возвращает старое — для
