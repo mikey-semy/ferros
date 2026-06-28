@@ -123,9 +123,9 @@ fn kill_faulting_user_process(what: &str, detail: u64, stack_frame: &InterruptSt
         "[user] ring-3 {what} (detail {detail:#x}) — killing process\n{stack_frame:#?}"
     );
     crate::syscall::USER_FAULT_KILLS.fetch_add(1, Ordering::SeqCst);
-    // Завершаем с кодом 128+SIGSEGV(11)=139 (Unix-конвенция «убит сигналом»); полноценная
-    // доставка сигналов — в 2a5.
-    crate::sched::thread::exit_current(139);
+    // Завершаем процесс как убитый SIGSEGV (M6f5): `wait` сообщит родителю `WIFSIGNALED` с этим
+    // сигналом (а не «обычный выход»). Полная доставка обработчиков сигналов — позже (HARDENING).
+    crate::sched::thread::exit_current_killed(crate::syscall::abi::SIGSEGV);
 }
 
 /// Счётчик тиков таймера (PIT, ~18.2 Гц). Растёт на каждом прерывании; основа отсчёта
