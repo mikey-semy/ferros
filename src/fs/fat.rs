@@ -42,6 +42,10 @@ const DIR_ENTRY_SIZE: usize = 32;
 const ATTR_LONG_NAME: u8 = 0x0F;
 /// Атрибут «метка тома»: тоже пропускаем.
 const ATTR_VOLUME_ID: u8 = 0x08;
+/// Атрибут «каталог».
+const ATTR_DIRECTORY: u8 = 0x10;
+/// Атрибут «архив» (обычный файл).
+const ATTR_ARCHIVE: u8 = 0x20;
 
 /// Почему операция с FAT не удалась.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +62,12 @@ pub enum FatError {
     NoSpace,
     /// В каталоге нет свободной записи (расширение каталога пока не реализовано — M6g2).
     DirFull,
+    /// Промежуточный компонент пути — не каталог (например, `a/b`, где `a` — файл).
+    NotADirectory,
+    /// Целевой путь — каталог, а ожидался файл (например, `read` каталога).
+    IsADirectory,
+    /// Запись с таким именем уже существует (например, `mkdir` существующего каталога).
+    AlreadyExists,
 }
 
 impl From<BlkError> for FatError {
@@ -87,10 +97,11 @@ pub struct Fat32 {
     fat_size: u32,
 }
 
-/// Найденная запись каталога (то, что нам нужно для чтения файла).
+/// Найденная запись каталога (то, что нам нужно для чтения файла / обхода пути).
 struct DirEntry {
     first_cluster: u32,
     size: u32,
+    is_dir: bool,
 }
 
 fn read_u16(buf: &[u8], off: usize) -> u16 {
@@ -213,6 +224,7 @@ impl Fat32 {
                         return Ok(Some(DirEntry {
                             first_cluster: (hi << 16) | lo,
                             size: read_u32(entry, 28),
+                            is_dir: attr & ATTR_DIRECTORY != 0,
                         }));
                     }
                 }
@@ -222,12 +234,44 @@ impl Fat32 {
         Ok(None)
     }
 
-    /// Читает файл `name` (формат 8.3, например `"HELLO.TXT"`) из корневого каталога и
-    /// возвращает его содержимое. Идёт по цепочке кластеров, набирая ровно `size` байт.
-    pub fn read_file(&self, name: &str) -> Result<Vec<u8>, FatError> {
+    /// Разбирает путь `/a/b/file` в `(кластер каталога-родителя, имя последнего компонента)`,
+    /// спускаясь по промежуточным каталогам от корня. Ведущие/повторные `/` игнорируются.
+    /// `-NotADirectory`, если промежуточный компонент оказался файлом; `-NotFound`, если его
+    /// нет или путь пуст.
+    fn resolve_parent<'a>(&self, path: &'a str) -> Result<(u32, &'a str), FatError> {
+        let trimmed = path.trim_matches('/');
+        let mut cluster = self.root_cluster;
+        let mut name = "";
+        let mut iter = trimmed.split('/').filter(|c| !c.is_empty()).peekable();
+        while let Some(comp) = iter.next() {
+            if iter.peek().is_none() {
+                name = comp; // последний компонент — имя файла/каталога
+                break;
+            }
+            // Промежуточный компонент обязан быть существующим каталогом.
+            let entry = self.find_in_dir(cluster, comp)?.ok_or(FatError::NotFound)?;
+            if !entry.is_dir {
+                return Err(FatError::NotADirectory);
+            }
+            cluster = entry.first_cluster;
+        }
+        if name.is_empty() {
+            return Err(FatError::NotFound); // путь без имени (например, "/")
+        }
+        Ok((cluster, name))
+    }
+
+    /// Читает файл по пути `path` (компоненты 8.3, например `"DIR/HELLO.TXT"`) и возвращает его
+    /// содержимое. Спускается по подкаталогам, затем идёт по цепочке кластеров, набирая ровно
+    /// `size` байт. `-IsADirectory`, если путь указывает на каталог.
+    pub fn read_file(&self, path: &str) -> Result<Vec<u8>, FatError> {
+        let (dir_cluster, name) = self.resolve_parent(path)?;
         let entry = self
-            .find_in_dir(self.root_cluster, name)?
+            .find_in_dir(dir_cluster, name)?
             .ok_or(FatError::NotFound)?;
+        if entry.is_dir {
+            return Err(FatError::IsADirectory);
+        }
 
         let mut data = Vec::with_capacity(entry.size as usize);
         let mut remaining = entry.size as usize;
@@ -415,36 +459,33 @@ impl Fat32 {
         }
     }
 
-    /// Записывает 32-байтную запись каталога по `(sector, offset)`: имя 8.3, атрибут «архив»
-    /// (обычный файл), первый кластер и размер; поля времени/даты обнуляем.
+    /// Записывает 32-байтную запись каталога по `(sector, offset)`: имя 8.3, атрибут, первый
+    /// кластер и размер (read-modify-write сектора; остальные записи не трогаем).
     fn write_dir_entry(
         &self,
         sector: u32,
         offset: usize,
         name: &[u8; 11],
+        attr: u8,
         first_cluster: u32,
         size: u32,
     ) -> Result<(), FatError> {
         let mut buf = [0u8; SECTOR_SIZE];
         virtio_blk::read_sector(sector as u64, &mut buf)?;
-        let e = &mut buf[offset..offset + DIR_ENTRY_SIZE];
-        e[..11].copy_from_slice(name);
-        e[11] = 0x20; // ATTR_ARCHIVE — обычный файл
-        for b in e[12..20].iter_mut() {
-            *b = 0; // NTRes, время создания, дата
-        }
-        e[20..22].copy_from_slice(&((first_cluster >> 16) as u16).to_le_bytes()); // high
-        for b in e[22..26].iter_mut() {
-            *b = 0; // время/дата записи
-        }
-        e[26..28].copy_from_slice(&((first_cluster & 0xFFFF) as u16).to_le_bytes()); // low
-        e[28..32].copy_from_slice(&size.to_le_bytes());
+        fill_dir_entry(
+            &mut buf[offset..offset + DIR_ENTRY_SIZE],
+            name,
+            attr,
+            first_cluster,
+            size,
+        );
         virtio_blk::write_sector(sector as u64, &buf)?;
         Ok(())
     }
 
-    /// Создаёт или перезаписывает файл `name` (8.3) в корневом каталоге его содержимым `data`.
-    /// Пустой файл → первый кластер 0 (как в FAT).
+    /// Создаёт или перезаписывает файл по пути `path` (компоненты 8.3) его содержимым `data`.
+    /// Спускается по подкаталогам (родитель должен существовать). Пустой файл → первый кластер
+    /// 0 (как в FAT).
     ///
     /// Порядок безопасной замены: СНАЧАЛА строим новое содержимое (новая цепочка + данные),
     /// ПОТОМ одним обновлением записи каталога переключаем файл на него (коммит), и лишь ЗАТЕМ
@@ -452,12 +493,13 @@ impl Fat32 {
     /// СТАРЫЙ файл нетронутым, а свежая цепочка откатывается — провал записи не разрушает файл.
     /// Заодно это гарантирует, что новые кластеры не пересекаются со старыми (старые в момент
     /// выделения ещё заняты).
-    pub fn write_file(&self, name: &str, data: &[u8]) -> Result<(), FatError> {
+    pub fn write_file(&self, path: &str, data: &[u8]) -> Result<(), FatError> {
+        let (dir_cluster, name) = self.resolve_parent(path)?;
         let target = short_name_83(name);
 
         // 1) Существующая запись (под перезапись, с её первым кластером) или свободный слот.
         let (slot_sector, slot_offset, old_first) =
-            self.locate_or_free_slot(self.root_cluster, &target)?;
+            self.locate_or_free_slot(dir_cluster, &target)?;
 
         // 2) Строим новое содержимое, НЕ трогая существующий файл (пустой файл — без кластеров).
         let cluster_bytes = self.sectors_per_cluster as usize * SECTOR_SIZE;
@@ -478,6 +520,7 @@ impl Fat32 {
             slot_sector,
             slot_offset,
             &target,
+            ATTR_ARCHIVE,
             new_first,
             data.len() as u32,
         ) {
@@ -496,4 +539,84 @@ impl Fat32 {
         }
         Ok(())
     }
+
+    /// Инициализирует кластер нового каталога: первый сектор получает записи `.` (на себя) и
+    /// `..` (на родителя; 0, если родитель — корень, как требует спека FAT), остальное — нули.
+    fn init_dir_cluster(&self, cluster: u32, parent: u32) -> Result<(), FatError> {
+        let first_sec = self.first_sector_of_cluster(cluster);
+        let mut buf = [0u8; SECTOR_SIZE];
+        fill_dir_entry(
+            &mut buf[0..DIR_ENTRY_SIZE],
+            b".          ",
+            ATTR_DIRECTORY,
+            cluster,
+            0,
+        );
+        let dotdot = if parent == self.root_cluster {
+            0
+        } else {
+            parent
+        };
+        fill_dir_entry(
+            &mut buf[DIR_ENTRY_SIZE..2 * DIR_ENTRY_SIZE],
+            b"..         ",
+            ATTR_DIRECTORY,
+            dotdot,
+            0,
+        );
+        virtio_blk::write_sector(first_sec as u64, &buf)?;
+        // Остальные секторы кластера обнуляем (чтобы 0x00 в первой же записи завершал каталог).
+        let zero = [0u8; SECTOR_SIZE];
+        for s in 1..self.sectors_per_cluster {
+            virtio_blk::write_sector((first_sec + s) as u64, &zero)?;
+        }
+        Ok(())
+    }
+
+    /// Создаёт каталог по пути `path` (родитель должен существовать). Выделяет под него кластер,
+    /// кладёт `.`/`..` и записывает запись-каталог в родителя. `-AlreadyExists`, если имя занято.
+    pub fn mkdir(&self, path: &str) -> Result<(), FatError> {
+        let (parent_cluster, name) = self.resolve_parent(path)?;
+        let target = short_name_83(name);
+
+        let (slot_sector, slot_offset, existing) =
+            self.locate_or_free_slot(parent_cluster, &target)?;
+        if existing.is_some() {
+            return Err(FatError::AlreadyExists);
+        }
+
+        let new_cluster = self.alloc_cluster()?; // помечен EOC
+        if let Err(e) = self.init_dir_cluster(new_cluster, parent_cluster) {
+            let _ = self.free_chain(new_cluster);
+            return Err(e);
+        }
+        if let Err(e) = self.write_dir_entry(
+            slot_sector,
+            slot_offset,
+            &target,
+            ATTR_DIRECTORY,
+            new_cluster,
+            0,
+        ) {
+            let _ = self.free_chain(new_cluster);
+            return Err(e);
+        }
+        Ok(())
+    }
+}
+
+/// Заполняет 32-байтную запись каталога в срезе `entry`: имя 8.3, атрибут, первый кластер
+/// (hi/lo) и размер; поля времени/даты обнуляем.
+fn fill_dir_entry(entry: &mut [u8], name: &[u8; 11], attr: u8, first_cluster: u32, size: u32) {
+    entry[..11].copy_from_slice(name);
+    entry[11] = attr;
+    for b in entry[12..20].iter_mut() {
+        *b = 0; // NTRes, время создания, дата
+    }
+    entry[20..22].copy_from_slice(&((first_cluster >> 16) as u16).to_le_bytes()); // high
+    for b in entry[22..26].iter_mut() {
+        *b = 0; // время/дата записи
+    }
+    entry[26..28].copy_from_slice(&((first_cluster & 0xFFFF) as u16).to_le_bytes()); // low
+    entry[28..32].copy_from_slice(&size.to_le_bytes());
 }

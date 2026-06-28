@@ -73,8 +73,8 @@ a real VFS) remains before **M7** (init process + shell).
     **M6g1 — virtio-blk sector write** (done; `write_sector` via DMA, `VIRTIO_BLK_T_OUT`),
     **M6g2 — FAT file write** (done; `fs::write_file` — free-cluster alloc + chain link + dir
     entry, mirrored to all FATs), **M6g3 — `write(fd)`/`O_CREAT` syscalls** (done; write-back on
-    `close`), M6g4 subdirectories + `mkdir`, M6g5 directory listing (`getdents`), M6g6 a real VFS
-    layer.
+    `close`), **M6g4 — subdirectories + `mkdir`** (done; path resolution, `.`/`..`), M6g5 directory
+    listing (`getdents`), M6g6 a real VFS layer.
 - **M7 — Shell.** init process, interactive shell, basic utilities, line editing.
 
 ## Tier D — A "real" OS
