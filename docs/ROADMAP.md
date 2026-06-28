@@ -69,7 +69,10 @@ a real VFS) remains before **M7** (init process + shell).
     **M6f4 — `wait4`** (zombies + block/wake, on a per-process syscall stack), **M6f5 — basic
     signals** (`kill` + default-terminate actions; ring-3 faults become `SIGSEGV`; `wait`
     reports `WIFSIGNALED`).
-  - Then **filesystem** breadth (write + subdirectories + a real VFS).
+  - **M6g — Filesystem breadth** (in progress). Write support across the stack. Stages:
+    **M6g1 — virtio-blk sector write** (done; `write_sector` via DMA, `VIRTIO_BLK_T_OUT`),
+    M6g2 FAT write (free-cluster alloc + chain extend + dir entries; `write(fd)` + `O_CREAT`),
+    M6g3 subdirectories + `mkdir`, M6g4 directory listing (`getdents`), M6g5 a real VFS layer.
 - **M7 — Shell.** init process, interactive shell, basic utilities, line editing.
 
 ## Tier D — A "real" OS

@@ -1,4 +1,5 @@
-//! Драйвер диска **virtio-blk** (legacy virtio-pci, M6b): чтение секторов.
+//! Драйвер диска **virtio-blk** (legacy virtio-pci, M6b): чтение и запись секторов (запись —
+//! M6g1).
 //!
 //! # Что такое virtio
 //!
@@ -67,6 +68,7 @@ const VIRTQ_AVAIL_F_NO_INTERRUPT: u16 = 1;
 
 // --- virtio-blk ---
 const VIRTIO_BLK_T_IN: u32 = 0; // чтение (устройство → память)
+const VIRTIO_BLK_T_OUT: u32 = 1; // запись (память → устройство)
 /// Размер сектора (байт). virtio-blk оперирует 512-байтными секторами.
 pub const SECTOR_SIZE: usize = 512;
 /// Выравнивание virtqueue в legacy (вся очередь — на границе страницы; used-кольцо тоже).
@@ -75,7 +77,7 @@ const QUEUE_ALIGN: usize = 4096;
 /// Глобальный экземпляр драйвера (одно устройство). `None`, пока не инициализирован.
 static DEVICE: Mutex<Option<VirtioBlk>> = Mutex::new(None);
 
-/// Почему чтение не удалось.
+/// Почему операция с диском не удалась.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlkError {
     /// Драйвер ещё не инициализирован (устройство не найдено).
@@ -247,6 +249,18 @@ pub fn read_sector(lba: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), BlkError
     unsafe { dev.submit_read(lba, buf) }
 }
 
+/// Записывает один 512-байтный сектор `lba` из `buf`. Синхронно, как [`read_sector`] (тот же
+/// путь virtqueue, только данные едут память → устройство).
+pub fn write_sector(lba: u64, buf: &[u8; SECTOR_SIZE]) -> Result<(), BlkError> {
+    let mut guard = DEVICE.lock();
+    let dev = guard.as_mut().ok_or(BlkError::NotInitialized)?;
+    if lba >= dev.capacity_sectors {
+        return Err(BlkError::OutOfRange);
+    }
+    // SAFETY: как в read_sector — единственный запрос за раз под мьютексом устройства.
+    unsafe { dev.submit_write(lba, buf) }
+}
+
 impl VirtioBlk {
     /// Записывает дескриптор `i`: адрес буфера, длину, флаги и индекс следующего.
     ///
@@ -261,34 +275,42 @@ impl VirtioBlk {
         core::ptr::write_volatile((d + 14) as *mut u16, next);
     }
 
-    /// Выполняет одно чтение сектора `lba` в `out` (см. [`read_sector`]).
+    /// Заполняет заголовок-команду (тип `blk_type`, сектор `lba`) и цепочку из трёх
+    /// дескрипторов: заголовок (читает устройство) → данные → статус (пишет устройство).
+    /// `data_device_write` — пишет ли устройство в буфер данных: `true` для чтения (данные едут
+    /// устройство → память), `false` для записи (память → устройство, устройство только читает).
     ///
     /// # Safety
-    /// Вызывается под `DEVICE.lock()` (единственный запрос за раз); адреса virtqueue/буфера
-    /// корректны и отображены.
-    unsafe fn submit_read(
-        &mut self,
-        lba: u64,
-        out: &mut [u8; SECTOR_SIZE],
-    ) -> Result<(), BlkError> {
-        // Заголовок-команда: читаем (IN) сектор lba.
-        core::ptr::write_volatile((self.buf_virt + BUF_HEADER) as *mut u32, VIRTIO_BLK_T_IN);
+    /// Вызывается под `DEVICE.lock()`; адреса virtqueue/буфера корректны и отображены.
+    unsafe fn setup_chain(&self, blk_type: u32, lba: u64, data_device_write: bool) {
+        core::ptr::write_volatile((self.buf_virt + BUF_HEADER) as *mut u32, blk_type);
         core::ptr::write_volatile((self.buf_virt + BUF_HEADER + 4) as *mut u32, 0); // ioprio
         core::ptr::write_volatile((self.buf_virt + BUF_HEADER + 8) as *mut u64, lba); // sector
         core::ptr::write_volatile((self.buf_virt + BUF_STATUS) as *mut u8, 0xFF); // «не записан»
 
-        // Цепочка из трёх дескрипторов: заголовок (читает устройство) → данные (пишет
-        // устройство) → статус (пишет устройство).
+        let data_flags = if data_device_write {
+            VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE
+        } else {
+            VIRTQ_DESC_F_NEXT
+        };
         self.write_desc(0, self.buf_phys + BUF_HEADER, 16, VIRTQ_DESC_F_NEXT, 1);
         self.write_desc(
             1,
             self.buf_phys + BUF_DATA,
             SECTOR_SIZE as u32,
-            VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
+            data_flags,
             2,
         );
         self.write_desc(2, self.buf_phys + BUF_STATUS, 1, VIRTQ_DESC_F_WRITE, 0);
+    }
 
+    /// Общая часть запроса: кладёт голову цепочки (дескриптор 0) в «доступное» кольцо, пинает
+    /// устройство, опрашивает «использованное» кольцо до завершения и возвращает результат по
+    /// байту статуса. Заголовок и дескрипторы должны быть уже заполнены [`Self::setup_chain`].
+    ///
+    /// # Safety
+    /// Вызывается под `DEVICE.lock()`; virtqueue корректна и отображена.
+    unsafe fn run_request(&mut self) -> Result<(), BlkError> {
         // Кладём голову цепочки (дескриптор 0) в «доступное» кольцо и двигаем idx.
         let avail = self.vq_virt + self.avail_offset as u64;
         let avail_idx_ptr = (avail + 2) as *mut u16;
@@ -316,11 +338,27 @@ impl VirtioBlk {
             core::hint::spin_loop();
         }
 
-        // Статус и копирование данных из bounce-буфера в буфер вызывающего.
         let status = core::ptr::read_volatile((self.buf_virt + BUF_STATUS) as *const u8);
         if status != 0 {
             return Err(BlkError::DeviceError(status));
         }
+        Ok(())
+    }
+
+    /// Выполняет одно чтение сектора `lba` в `out` (см. [`read_sector`]).
+    ///
+    /// # Safety
+    /// Вызывается под `DEVICE.lock()` (единственный запрос за раз); адреса virtqueue/буфера
+    /// корректны и отображены.
+    unsafe fn submit_read(
+        &mut self,
+        lba: u64,
+        out: &mut [u8; SECTOR_SIZE],
+    ) -> Result<(), BlkError> {
+        // Чтение: данные пишет устройство (data_device_write = true).
+        self.setup_chain(VIRTIO_BLK_T_IN, lba, true);
+        self.run_request()?;
+        // Копируем данные из bounce-буфера в буфер вызывающего.
         fence(Ordering::SeqCst);
         core::ptr::copy_nonoverlapping(
             (self.buf_virt + BUF_DATA) as *const u8,
@@ -328,5 +366,24 @@ impl VirtioBlk {
             SECTOR_SIZE,
         );
         Ok(())
+    }
+
+    /// Выполняет одну запись сектора `lba` из `data` (см. [`write_sector`]).
+    ///
+    /// # Safety
+    /// Вызывается под `DEVICE.lock()` (единственный запрос за раз); адреса virtqueue/буфера
+    /// корректны и отображены.
+    unsafe fn submit_write(&mut self, lba: u64, data: &[u8; SECTOR_SIZE]) -> Result<(), BlkError> {
+        // Копируем данные вызывающего в bounce-буфер ДО постановки запроса (устройство их
+        // оттуда прочитает).
+        core::ptr::copy_nonoverlapping(
+            data.as_ptr(),
+            (self.buf_virt + BUF_DATA) as *mut u8,
+            SECTOR_SIZE,
+        );
+        fence(Ordering::SeqCst);
+        // Запись: данные читает устройство (data_device_write = false).
+        self.setup_chain(VIRTIO_BLK_T_OUT, lba, false);
+        self.run_request()
     }
 }
