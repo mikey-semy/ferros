@@ -4,8 +4,11 @@ Each milestone is a complete, observable result ("it now does X") and ends with 
 merged PR. We detail a milestone only when we reach it. Current status: **M6 done**
 (PCI enumeration; virtio-blk disk over DMA; hand-rolled FAT32 read; fault-tolerant
 `uaccess`; VFS + `open`/`read`/`close`/`lseek` — a user process reads a file from disk;
-M0–M5 merged). **Next: M7** (init process + shell) — process reaping / polish still
-pending (needs a freeing frame allocator), a planned pre-M7 consolidation.
+M0–M5 merged). **Now in the pre-M7 "maturity" consolidation:** memory reclamation
+(M6e — freeing frame allocator, address-space teardown, process reaping) is **done**,
+and the process model (M6f) is underway — PIDs/`getpid`, `execve`, `fork`, and `wait4`
+are **done**; basic signals (M6f5) and then filesystem breadth remain before **M7**
+(init process + shell).
 
 > **North star (D8):** run the existing **Linux** software ecosystem rather than write a
 > native app ecosystem from scratch. Long-term aim is **ABI-level** compatibility
@@ -63,7 +66,8 @@ pending (needs a freeing frame allocator), a planned pre-M7 consolidation.
   - **M6f — Process model** (in progress). PIDs + fork/exec/wait + basic signals. Stages:
     **M6f1 — process table (PIDs + `getpid`)** (done), **M6f2 — `execve`** (done; loads from the
     FAT disk), **M6f3 — `fork`** (done; copies the address space + fd table + full register
-    context), M6f4 `wait`, M6f5 signals.
+    context), **M6f4 — `wait4`** (done; zombies + block/wake, on a per-process syscall stack),
+    M6f5 signals.
   - Then **filesystem** breadth (write + subdirectories + a real VFS).
 - **M7 — Shell.** init process, interactive shell, basic utilities, line editing.
 

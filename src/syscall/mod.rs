@@ -63,6 +63,7 @@ pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
         abi::SYS_CLOSE => files::sys_close(args[0]),
         abi::SYS_LSEEK => files::sys_lseek(args[0], args[1] as i64, args[2]),
         abi::SYS_GETPID => crate::sched::thread::current_pid() as i64,
+        abi::SYS_WAIT4 => sys_wait4(args[0] as i64, args[1]),
         abi::SYS_EXIT | abi::SYS_EXIT_GROUP => {
             let status = args[0] as i32;
             LAST_EXIT_CODE.store(status as i64, Ordering::SeqCst);
@@ -74,6 +75,27 @@ pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
         }
         // Неизвестный номер — как в Linux: -ENOSYS.
         _ => -abi::ENOSYS,
+    }
+}
+
+/// `wait4(pid, status, options, rusage)` (M6f4): ждёт завершения ребёнка. Поддержаны
+/// `pid == -1` (любой ребёнок) и `pid > 0` (конкретный); `options`/`rusage` игнорируем.
+/// Блокирует вызывающего, пока подходящий ребёнок не завершится; возвращает его PID и пишет
+/// закодированный статус в `*status` (если не NULL). `-ECHILD`, если подходящих детей нет.
+fn sys_wait4(pid: i64, status_ptr: u64) -> i64 {
+    match crate::sched::thread::wait_current(pid) {
+        Some((child_pid, code)) => {
+            if status_ptr != 0 {
+                // Кодировка статуса как в Linux для завершения по `exit`: код выхода — в
+                // битах 8..15 (младшие 7 бит = 0 → WIFEXITED, WEXITSTATUS = (status >> 8) & 0xff).
+                let encoded = ((code & 0xff) << 8) as u32;
+                if let Err(errno) = uaccess::copy_to_user(status_ptr, &encoded.to_ne_bytes()) {
+                    return -errno;
+                }
+            }
+            child_pid as i64
+        }
+        None => -abi::ECHILD,
     }
 }
 

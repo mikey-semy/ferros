@@ -43,6 +43,9 @@ pub static EXECTEST_ELF: &[u8] = include_bytes!(env!("USER_EXECTEST_ELF"));
 /// Встроенная проверка `fork` (M6f3): форкается; ребёнок и родитель выходят с разными кодами.
 pub static FORKTEST_ELF: &[u8] = include_bytes!(env!("USER_FORKTEST_ELF"));
 
+/// Встроенная проверка `fork`+`wait4` (M6f4): родитель дожидается ребёнка и проверяет его статус.
+pub static WAITTEST_ELF: &[u8] = include_bytes!(env!("USER_WAITTEST_ELF"));
+
 /// Почему ELF не удалось загрузить.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfError {

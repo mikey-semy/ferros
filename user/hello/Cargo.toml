@@ -41,6 +41,11 @@ path = "src/exectest.rs"
 name = "forktest"
 path = "src/forktest.rs"
 
+# Проверка fork+wait4 (M6f4): родитель дожидается ребёнка и проверяет его PID и код выхода.
+[[bin]]
+name = "waittest"
+path = "src/waittest.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"
