@@ -191,14 +191,28 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   file's content without changing the image size won't auto-regenerate (delete the image to
   force it). The test file's name/content are duplicated between `build.rs` and
   `tests/fat_read.rs` (separate crates can't share a const).
-- **FAT reader is read-only, FAT32-only, root-dir-only, 8.3-only (M6c).** `fs::fat` reads;
-  there's no write/create/delete. It only handles FAT32 (rejects FAT12/16), assumes 512-byte
-  sectors, finds files only in the **root** directory (no path parsing / subdirectory
-  traversal, though `find_in_dir` is cluster-generic), matches only short **8.3** names (LFN
-  entries are skipped, not assembled), and reads a whole file into a `Vec` (no seek/streaming,
-  no partial reads). It also re-reads the BPB on every `mount()` and re-reads FAT/dir sectors
-  per call with **no caching** — O(sectors) per lookup. A real VFS + a buffer cache + LFN +
-  subdirectories + write come later.
+- **FAT is FAT32-only, root-dir-only, 8.3-only (M6c; whole-file write added M6g2).** `fs::fat`
+  reads and now writes (`write_file` creates/overwrites), but only in the **root** directory (no
+  path parsing / subdirectory traversal, though the scan helpers are cluster-generic), only FAT32
+  (rejects FAT12/16), 512-byte sectors, short **8.3** names only (LFN entries skipped, not
+  assembled), whole-file in a `Vec` (no seek/streaming/partial I/O). It re-reads the BPB on every
+  `mount()` and re-reads FAT/dir sectors per call with **no caching** — O(sectors) per lookup. A
+  real VFS + buffer cache + LFN + subdirectories come later.
+- **FAT write is whole-file, not crash-safe, no dir growth / delete (M6g2).** `write_file`
+  replaces a file's entire contents (no append/random-write/truncate-to-size); there's no
+  `unlink`/delete and no directory **extension** — if the root dir's existing clusters have no
+  free 32-byte slot, it returns `DirFull` instead of allocating another dir cluster. Free-cluster
+  search is a linear FAT scan from cluster 2 with **no FSInfo / next-free hint** (O(FAT) per
+  allocation; a multi-cluster file rescans from the start each cluster). The ordering is
+  *failure-safe within the API* (build new chain + data → commit the dir entry → only then free
+  the old chain; a `NoSpace`/device error before commit rolls back the new chain and leaves the
+  existing file intact), but it is **not crash-consistent across power loss**: the commit is a
+  single non-barriered sector write and the post-commit free of the old chain is a separate write,
+  so a crash at the wrong moment can still leak clusters (and, on real hardware without a flush
+  barrier, reorder). Because new clusters are allocated while the old chain is still live, an
+  overwrite needs room for both copies at once (can `NoSpace` even when in-place would fit).
+  Directory timestamps are written as zero. A real FS needs ordered writes / journaling, an
+  allocation cursor, and dir growth.
 - **FAT reader trusts a well-formed image (M6c).** It now bounds cluster numbers to the
   volume (`valid_cluster`, prevents sector-address overflow / wild reads) and caps chain
   traversal (prevents a cyclic-chain hang), but it still **trusts the directory's file size**:

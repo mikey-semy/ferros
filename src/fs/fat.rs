@@ -1,4 +1,4 @@
-//! Чтение **FAT32** поверх блочного устройства (M6c).
+//! Чтение и запись **FAT32** поверх блочного устройства (M6c; запись — M6g2).
 //!
 //! # Что такое FAT
 //!
@@ -16,16 +16,24 @@
 //!
 //! # Узко и намеренно (как загрузчик ELF, D9/D10)
 //!
-//! Только **чтение**, только **FAT32**, имена **8.3** (без длинных имён LFN), размер сектора
-//! 512 (как у нашего virtio-blk). Чтение идёт по одному сектору через
-//! [`crate::drivers::virtio_blk::read_sector`] — без кэша (для bring-up достаточно).
+//! Только **FAT32**, имена **8.3** (без длинных имён LFN), размер сектора 512 (как у нашего
+//! virtio-blk). Ввод-вывод — по одному сектору через [`crate::drivers::virtio_blk`], без кэша
+//! (для bring-up достаточно). Запись (M6g2) создаёт/перезаписывает файлы в КОРНЕВОМ каталоге:
+//! выделяет свободные кластеры, связывает цепочку, обновляет запись каталога (зеркаля все копии
+//! FAT). Подкаталоги, удаление, расширение каталога и кэш — позже (см. `docs/HARDENING.md`).
 
 use crate::drivers::virtio_blk::{self, BlkError, SECTOR_SIZE};
 use alloc::vec::Vec;
 
+/// Записей FAT32 в одном секторе (по 4 байта).
+const FAT_ENTRIES_PER_SECTOR: u32 = SECTOR_SIZE as u32 / 4;
+
 /// Маска значащих бит записи FAT32 (старшие 4 бита зарезервированы). Конец цепочки (EOC) —
 /// значение ≥ 0x0FFFFFF8; такие (как и 0/1 и всё вне тома) отсекает [`Fat32::valid_cluster`].
 const FAT32_ENTRY_MASK: u32 = 0x0FFF_FFFF;
+/// Значение «конец цепочки» (EOC), которое пишем в последний кластер файла. Любое ≥ 0x0FFFFFF8
+/// читается как конец; [`Fat32::valid_cluster`] такой кластер отвергает.
+const FAT32_EOC: u32 = 0x0FFF_FFFF;
 /// Первый «настоящий» кластер данных (0 и 1 зарезервированы).
 const FIRST_DATA_CLUSTER: u32 = 2;
 /// Размер одной записи каталога (байт).
@@ -46,6 +54,10 @@ pub enum FatError {
     NotFat32,
     /// Файл не найден в корневом каталоге.
     NotFound,
+    /// На томе нет свободных кластеров под запись.
+    NoSpace,
+    /// В каталоге нет свободной записи (расширение каталога пока не реализовано — M6g2).
+    DirFull,
 }
 
 impl From<BlkError> for FatError {
@@ -68,6 +80,11 @@ pub struct Fat32 {
     /// `2 .. 2 + cluster_count`). Защищает от переполнения арифметики адреса сектора и от
     /// «диких» номеров в повреждённой FAT.
     cluster_count: u32,
+    /// Сколько копий FAT на томе (обычно 2). Запись зеркалим во все — иначе образ будет
+    /// несогласован для других читателей (наш читает только первую).
+    num_fats: u32,
+    /// Размер одной FAT в секторах (для адресации второй и последующих копий).
+    fat_size: u32,
 }
 
 /// Найденная запись каталога (то, что нам нужно для чтения файла).
@@ -140,6 +157,8 @@ impl Fat32 {
             data_start_sector,
             root_cluster,
             cluster_count,
+            num_fats,
+            fat_size: fat_size_32,
         })
     }
 
@@ -228,5 +247,253 @@ impl Fat32 {
             cluster = self.next_cluster(cluster)?;
         }
         Ok(data)
+    }
+
+    /// Пишет запись FAT для `cluster` = `value` (значащие 28 бит), сохраняя 4 старших
+    /// зарезервированных бита. Зеркалит во ВСЕ копии FAT (read-modify-write по сектору каждой).
+    fn write_fat_entry(&self, cluster: u32, value: u32) -> Result<(), FatError> {
+        let fat_offset = cluster * 4;
+        let within = fat_offset / SECTOR_SIZE as u32; // сектор внутри одной FAT
+        let offset = (fat_offset % SECTOR_SIZE as u32) as usize;
+        for fat in 0..self.num_fats {
+            let sector = self.fat_start_sector + fat * self.fat_size + within;
+            let mut buf = [0u8; SECTOR_SIZE];
+            virtio_blk::read_sector(sector as u64, &mut buf)?;
+            // Сохраняем старшие 4 бита (зарезервированы спекой), меняем значащие 28.
+            let old = read_u32(&buf, offset);
+            let new = (old & !FAT32_ENTRY_MASK) | (value & FAT32_ENTRY_MASK);
+            buf[offset..offset + 4].copy_from_slice(&new.to_le_bytes());
+            virtio_blk::write_sector(sector as u64, &buf)?;
+        }
+        Ok(())
+    }
+
+    /// Находит первый свободный кластер (запись FAT == 0), помечает его концом цепочки (EOC) и
+    /// возвращает его номер. Сканирует FAT по секторам (а не по кластеру за раз). `-NoSpace`,
+    /// если свободных нет.
+    fn alloc_cluster(&self) -> Result<u32, FatError> {
+        let last = FIRST_DATA_CLUSTER + self.cluster_count; // верхняя граница (исключительно)
+        let mut cluster = FIRST_DATA_CLUSTER;
+        while cluster < last {
+            let sector = self.fat_start_sector + cluster / FAT_ENTRIES_PER_SECTOR;
+            let mut buf = [0u8; SECTOR_SIZE];
+            virtio_blk::read_sector(sector as u64, &mut buf)?;
+            // Перебираем записи этого сектора, начиная с `cluster`.
+            while cluster < last
+                && cluster / FAT_ENTRIES_PER_SECTOR == (sector - self.fat_start_sector)
+            {
+                let off = (cluster % FAT_ENTRIES_PER_SECTOR) as usize * 4;
+                if read_u32(&buf, off) & FAT32_ENTRY_MASK == 0 {
+                    self.write_fat_entry(cluster, FAT32_EOC)?;
+                    return Ok(cluster);
+                }
+                cluster += 1;
+            }
+        }
+        Err(FatError::NoSpace)
+    }
+
+    /// Выделяет цепочку из `n` кластеров (n ≥ 1), связывает их и возвращает первый. Последний
+    /// помечен EOC (его ставит [`Self::alloc_cluster`]). При нехватке места (`NoSpace`)
+    /// освобождает уже выделенную часть — частичная цепочка не утекает.
+    fn alloc_chain(&self, n: u32) -> Result<u32, FatError> {
+        let mut first = 0u32;
+        let mut prev = 0u32;
+        for _ in 0..n {
+            let c = match self.alloc_cluster() {
+                Ok(c) => c,
+                Err(e) => {
+                    // Откат: возвращаем уже выделенную часть цепочки в пул.
+                    if first != 0 {
+                        let _ = self.free_chain(first);
+                    }
+                    return Err(e);
+                }
+            };
+            if first == 0 {
+                first = c;
+            } else {
+                self.write_fat_entry(prev, c)?; // prev → c (перетирает временный EOC у prev)
+            }
+            prev = c;
+        }
+        Ok(first)
+    }
+
+    /// Освобождает цепочку кластеров, начиная с `first` (каждой записи FAT ставит 0). Нужна при
+    /// перезаписи файла — старая цепочка возвращается в пул. Ограничивает число шагов размером
+    /// тома (защита от цикла в повреждённой FAT).
+    fn free_chain(&self, first: u32) -> Result<(), FatError> {
+        let mut cluster = first;
+        let mut steps_left = self.cluster_count;
+        while self.valid_cluster(cluster) && steps_left > 0 {
+            steps_left -= 1;
+            let next = self.next_cluster(cluster)?;
+            self.write_fat_entry(cluster, 0)?;
+            cluster = next;
+        }
+        Ok(())
+    }
+
+    /// Пишет `data` в цепочку, начинающуюся с `first` (она должна быть достаточно длинной).
+    /// Последний неполный сектор дополняется нулями.
+    fn write_chain(&self, first: u32, data: &[u8]) -> Result<(), FatError> {
+        let mut cluster = first;
+        let mut written = 0usize;
+        let mut steps_left = self.cluster_count;
+        while written < data.len() && self.valid_cluster(cluster) && steps_left > 0 {
+            steps_left -= 1;
+            let first_sec = self.first_sector_of_cluster(cluster);
+            for s in 0..self.sectors_per_cluster {
+                if written >= data.len() {
+                    break;
+                }
+                let take = (data.len() - written).min(SECTOR_SIZE);
+                let mut buf = [0u8; SECTOR_SIZE]; // нули → неполный сектор дополнен нулями
+                buf[..take].copy_from_slice(&data[written..written + take]);
+                virtio_blk::write_sector((first_sec + s) as u64, &buf)?;
+                written += take;
+            }
+            cluster = self.next_cluster(cluster)?;
+        }
+        Ok(())
+    }
+
+    /// Местоположение записи каталога под имя `target`: возвращает `(сектор, смещение,
+    /// старый первый кластер)`. `Some(first)` — запись уже есть (перезапись, нужно освободить её
+    /// цепочку); `None` — отдан первый свободный слот (создание). `-DirFull`, если свободного
+    /// слота нет (расширение каталога — позже).
+    fn locate_or_free_slot(
+        &self,
+        dir_cluster: u32,
+        target: &[u8; 11],
+    ) -> Result<(u32, usize, Option<u32>), FatError> {
+        let mut first_free: Option<(u32, usize)> = None;
+        let mut cluster = dir_cluster;
+        let mut steps_left = self.cluster_count;
+        while self.valid_cluster(cluster) && steps_left > 0 {
+            steps_left -= 1;
+            let first = self.first_sector_of_cluster(cluster);
+            for s in 0..self.sectors_per_cluster {
+                let sector = first + s;
+                let mut buf = [0u8; SECTOR_SIZE];
+                virtio_blk::read_sector(sector as u64, &mut buf)?;
+                for (idx, entry) in buf.chunks_exact(DIR_ENTRY_SIZE).enumerate() {
+                    let offset = idx * DIR_ENTRY_SIZE;
+                    match entry[0] {
+                        // Конец каталога: этот слот свободен и дальше всё пусто. Если раньше
+                        // нашли удалённый слот — берём его, иначе этот (терминатор сохранится в
+                        // следующем нулевом слоте).
+                        0x00 => {
+                            let (sec, off) = first_free.unwrap_or((sector, offset));
+                            return Ok((sec, off, None));
+                        }
+                        0xE5 => {
+                            if first_free.is_none() {
+                                first_free = Some((sector, offset));
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    let attr = entry[11];
+                    if attr & ATTR_LONG_NAME == ATTR_LONG_NAME || attr & ATTR_VOLUME_ID != 0 {
+                        continue;
+                    }
+                    if entry[..11] == target[..] {
+                        let hi = read_u16(entry, 20) as u32;
+                        let lo = read_u16(entry, 26) as u32;
+                        return Ok((sector, offset, Some((hi << 16) | lo)));
+                    }
+                }
+            }
+            cluster = self.next_cluster(cluster)?;
+        }
+        match first_free {
+            Some((sector, offset)) => Ok((sector, offset, None)),
+            None => Err(FatError::DirFull),
+        }
+    }
+
+    /// Записывает 32-байтную запись каталога по `(sector, offset)`: имя 8.3, атрибут «архив»
+    /// (обычный файл), первый кластер и размер; поля времени/даты обнуляем.
+    fn write_dir_entry(
+        &self,
+        sector: u32,
+        offset: usize,
+        name: &[u8; 11],
+        first_cluster: u32,
+        size: u32,
+    ) -> Result<(), FatError> {
+        let mut buf = [0u8; SECTOR_SIZE];
+        virtio_blk::read_sector(sector as u64, &mut buf)?;
+        let e = &mut buf[offset..offset + DIR_ENTRY_SIZE];
+        e[..11].copy_from_slice(name);
+        e[11] = 0x20; // ATTR_ARCHIVE — обычный файл
+        for b in e[12..20].iter_mut() {
+            *b = 0; // NTRes, время создания, дата
+        }
+        e[20..22].copy_from_slice(&((first_cluster >> 16) as u16).to_le_bytes()); // high
+        for b in e[22..26].iter_mut() {
+            *b = 0; // время/дата записи
+        }
+        e[26..28].copy_from_slice(&((first_cluster & 0xFFFF) as u16).to_le_bytes()); // low
+        e[28..32].copy_from_slice(&size.to_le_bytes());
+        virtio_blk::write_sector(sector as u64, &buf)?;
+        Ok(())
+    }
+
+    /// Создаёт или перезаписывает файл `name` (8.3) в корневом каталоге его содержимым `data`.
+    /// Пустой файл → первый кластер 0 (как в FAT).
+    ///
+    /// Порядок безопасной замены: СНАЧАЛА строим новое содержимое (новая цепочка + данные),
+    /// ПОТОМ одним обновлением записи каталога переключаем файл на него (коммит), и лишь ЗАТЕМ
+    /// освобождаем старую цепочку. Поэтому сбой (нет места / ошибка диска) до коммита оставляет
+    /// СТАРЫЙ файл нетронутым, а свежая цепочка откатывается — провал записи не разрушает файл.
+    /// Заодно это гарантирует, что новые кластеры не пересекаются со старыми (старые в момент
+    /// выделения ещё заняты).
+    pub fn write_file(&self, name: &str, data: &[u8]) -> Result<(), FatError> {
+        let target = short_name_83(name);
+
+        // 1) Существующая запись (под перезапись, с её первым кластером) или свободный слот.
+        let (slot_sector, slot_offset, old_first) =
+            self.locate_or_free_slot(self.root_cluster, &target)?;
+
+        // 2) Строим новое содержимое, НЕ трогая существующий файл (пустой файл — без кластеров).
+        let cluster_bytes = self.sectors_per_cluster as usize * SECTOR_SIZE;
+        let new_first = if data.is_empty() {
+            0
+        } else {
+            let n = data.len().div_ceil(cluster_bytes) as u32;
+            let first = self.alloc_chain(n)?;
+            if let Err(e) = self.write_chain(first, data) {
+                let _ = self.free_chain(first); // откат свежей цепочки
+                return Err(e);
+            }
+            first
+        };
+
+        // 3) КОММИТ: переключаем запись каталога на новое содержимое. До этого файл — старый.
+        if let Err(e) = self.write_dir_entry(
+            slot_sector,
+            slot_offset,
+            &target,
+            new_first,
+            data.len() as u32,
+        ) {
+            if new_first != 0 {
+                let _ = self.free_chain(new_first); // запись не закоммитилась — откат
+            }
+            return Err(e);
+        }
+
+        // 4) Старое содержимое больше ни на что не ссылается — освобождаем (best-effort: его
+        //    провал лишь оставит старые кластеры неиспользуемыми, файл уже корректно новый).
+        if let Some(first) = old_first {
+            if self.valid_cluster(first) {
+                let _ = self.free_chain(first);
+            }
+        }
+        Ok(())
     }
 }
