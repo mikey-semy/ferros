@@ -87,6 +87,23 @@ path = "src/cwdtest.rs"
 name = "shell"
 path = "src/shell.rs"
 
+# coreutils (M7f): внешние программы в /bin, запускаются shell'ом. В ядро НЕ встраиваются.
+[[bin]]
+name = "echo"
+path = "src/echo.rs"
+
+[[bin]]
+name = "cat"
+path = "src/cat.rs"
+
+[[bin]]
+name = "ls"
+path = "src/ls.rs"
+
+[[bin]]
+name = "mkdir"
+path = "src/mkdir.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"
