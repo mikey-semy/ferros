@@ -32,6 +32,7 @@ fn main() {
         "src/argvecho.rs",
         "src/execargv.rs",
         "src/cwdtest.rs",
+        "src/shell.rs",
         "Cargo.toml",
         "Cargo.lock",
         "linker.ld",
@@ -57,6 +58,7 @@ fn main() {
         ("stdintest", "USER_STDINTEST_ELF"),
         ("execargv", "USER_EXECARGV_ELF"),
         ("cwdtest", "USER_CWDTEST_ELF"),
+        ("shell", "USER_SHELL_ELF"),
     ];
 
     // Удаляем прошлые ELF перед сборкой: cargo не отслеживает linker.ld / target.json как

@@ -65,6 +65,10 @@ pub static EXECARGV_ELF: &[u8] = include_bytes!(env!("USER_EXECARGV_ELF"));
 /// Встроенная проверка cwd (M7c): `getcwd`/`chdir`/относительный `open`/`..` вокруг каталога SUB.
 pub static CWDTEST_ELF: &[u8] = include_bytes!(env!("USER_CWDTEST_ELF"));
 
+/// Встроенный интерактивный shell (M7d): запускается ядром как PID 1 — REPL поверх stdin с
+/// встроенными командами и запуском внешних программ через fork/execve/wait4.
+pub static SHELL_ELF: &[u8] = include_bytes!(env!("USER_SHELL_ELF"));
+
 /// Почему ELF не удалось загрузить.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfError {
