@@ -58,7 +58,7 @@ pub static USER_FAULT_KILLS: AtomicU64 = AtomicU64::new(0);
 pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
     match nr {
         abi::SYS_WRITE => sys_write(args[0], args[1], args[2], user_rsp),
-        abi::SYS_OPEN => files::sys_open(args[0]),
+        abi::SYS_OPEN => files::sys_open(args[0], args[1]),
         abi::SYS_READ => files::sys_read(args[0], args[1], args[2]),
         abi::SYS_CLOSE => files::sys_close(args[0]),
         abi::SYS_LSEEK => files::sys_lseek(args[0], args[1] as i64, args[2]),
@@ -126,11 +126,12 @@ fn sys_kill(pid: i64, sig: u64) -> i64 {
 /// Поддержаны `fd=1` (stdout → VGA) и `fd=2` (stderr → serial); прочее → `-EBADF`.
 /// Возвращает число записанных байт или `-errno`.
 fn sys_write(fd: u64, buf: u64, count: u64, user_rsp: u64) -> i64 {
-    // Куда выводим — решаем по fd ДО чтения памяти пользователя.
+    // Куда выводим — решаем по fd ДО чтения памяти пользователя. fd 1/2 — консоль; прочие
+    // (обычные файлы, fd ≥ 3) обслуживает файловый слой (M6g3).
     let sink: fn(&[u8]) = match fd {
         1 => vga::write_bytes,
         2 => serial::write_bytes,
-        _ => return -abi::EBADF,
+        _ => return files::sys_write(fd, buf, count),
     };
 
     match uaccess::with_user_bytes(buf, count, |bytes| {

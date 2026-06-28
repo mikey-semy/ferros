@@ -149,6 +149,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         ferros::syscall::elf::FORKTEST_ELF, // M6f3: форкнётся — два процесса завершатся
         ferros::syscall::elf::WAITTEST_ELF, // M6f4: форк + wait4 — родитель соберёт ребёнка
         ferros::syscall::elf::KILLTEST_ELF, // M6f5: форк + kill(SIGTERM) — родитель убьёт ребёнка
+        ferros::syscall::elf::WRITETEST_ELF, // M6g3: создаёт файл записью через сисколлы
     ] {
         unsafe {
             ferros::arch::x86_64::syscall::spawn_user(elf, phys_mem_offset, &mut frame_allocator)
