@@ -33,7 +33,9 @@ const SEEK_SET: u64 = 0;
 const SEEK_CUR: u64 = 1;
 const SEEK_END: u64 = 2;
 
-/// Открытый файл: его содержимое целиком и текущая позиция чтения.
+/// Открытый файл: его содержимое целиком и текущая позиция чтения. `Clone` — для `fork`
+/// (M6f3): ребёнок получает независимую копию (своё содержимое и свою позицию).
+#[derive(Clone)]
 struct OpenFile {
     data: Vec<u8>,
     offset: usize,
@@ -60,6 +62,17 @@ pub fn rekey_process(old_cr3: u64, new_cr3: u64) {
     let mut procs = PROCESSES.lock();
     if let Some(table) = procs.remove(&old_cr3) {
         procs.insert(new_cr3, table);
+    }
+}
+
+/// Клонирует таблицу дескрипторов процесса `parent_cr3` для ребёнка `child_cr3` — для `fork`
+/// (M6f3): ребёнок наследует независимые копии открытых файлов родителя (каждая со своим
+/// содержимым и позицией). Если у родителя таблицы ещё нет (ни одного `open`), у ребёнка её
+/// тоже не будет (создастся при первом обращении).
+pub fn fork_fds(parent_cr3: u64, child_cr3: u64) {
+    let mut procs = PROCESSES.lock();
+    if let Some(table) = procs.get(&parent_cr3).cloned() {
+        procs.insert(child_cr3, table);
     }
 }
 
