@@ -51,6 +51,11 @@ path = "src/waittest.rs"
 name = "killtest"
 path = "src/killtest.rs"
 
+# Проверка записи файлов (M6g3): создаёт файл, пишет, закрывает, читает обратно и сверяет.
+[[bin]]
+name = "writetest"
+path = "src/writetest.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"

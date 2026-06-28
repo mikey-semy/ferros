@@ -239,11 +239,18 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   allocator. The virtqueue/buffer frames are allocated once and never freed (M3 item). A
   trait for contiguous/DMA allocation would decouple it.
 
-- **File syscalls are minimal and read-only (M6d2).** `open`/`read`/`close`/`lseek` exist,
-  but: `open` reads the **whole file into memory** (no streaming/`mmap`, no large-file
-  support) and ignores `flags`/`mode`; there's **no** `write`/`create`/`unlink`/`stat`/`dup`,
-  no `O_*` flags, no directories (root, 8.3 names — the M6c FAT limits), and `read` on fd 0
-  (stdin) isn't a thing. Paths are capped at 256 bytes. A real file model (streaming, write,
+- **File syscalls are minimal; write is buffered write-back (M6d2; write added M6g3).**
+  `open`/`read`/`write`/`close`/`lseek` exist. `open` reads the **whole file into memory** (no
+  streaming/`mmap`, no large-file support) and honors only `O_RDONLY`/`O_WRONLY`/`O_RDWR`/
+  `O_CREAT`/`O_TRUNC` (no `O_APPEND`/`O_EXCL`/…, `mode` ignored). **Write is write-back**: `write`
+  mutates the in-memory buffer and `close` flushes it via `fs::write_file` — so **a process that
+  exits without `close` loses its writes** (the reaper drops the fd table without flushing; there
+  is no flush-on-exit), and there's no `fsync`. `write` at an offset past EOF zero-fills the gap.
+  Still **no** `unlink`/`stat`/`dup`/`rename`, no directories (root, 8.3 — the M6c/M6g2 FAT
+  limits), and `read` on fd 0 (stdin) isn't a thing. Paths are capped at 256 bytes. Because
+  `OpenFile` is *copied* on `fork` (M6f3), parent and child have independent buffers and offsets
+  (real Unix shares the open-file description / offset) — and two dirty copies both flushing on
+  `close` is last-writer-wins. A real file model (streaming, shared open-file table, flush-on-exit,
   a proper VFS with mount points/inodes) is later work.
 - **Per-process fd table keyed by CR3 (M6d2; leak fixed M6e3).** `syscall::files` stores each
   process's open files in a `BTreeMap` keyed by its PML4 physical address (avoids touching the
