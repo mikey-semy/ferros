@@ -20,6 +20,7 @@
 
 use super::{abi, uaccess};
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -33,12 +34,20 @@ const SEEK_SET: u64 = 0;
 const SEEK_CUR: u64 = 1;
 const SEEK_END: u64 = 2;
 
-/// Открытый файл: его содержимое целиком и текущая позиция чтения. `Clone` — для `fork`
-/// (M6f3): ребёнок получает независимую копию (своё содержимое и свою позицию).
+/// Открытый файл: его содержимое целиком и текущая позиция. `Clone` — для `fork` (M6f3):
+/// ребёнок получает независимую копию. Запись (M6g3) идёт по модели **write-back**: `write`
+/// меняет буфер `data` в памяти и взводит `dirty`, а `close` сбрасывает буфер на диск
+/// (`fs::write_file` по имени `name`). Незакрытый файл свои изменения теряет — см. HARDENING.
 #[derive(Clone)]
 struct OpenFile {
+    /// Имя файла (путь) — нужно, чтобы при `close` записать буфер обратно на диск.
+    name: String,
     data: Vec<u8>,
     offset: usize,
+    /// Открыт ли на запись (`O_WRONLY`/`O_RDWR`). `write` в файл только для чтения — `-EBADF`.
+    writable: bool,
+    /// Есть ли несброшенные изменения (нужно записать на диск при `close`).
+    dirty: bool,
 }
 
 /// Реестр таблиц дескрипторов по процессам: ключ — физический адрес PML4 (CR3) процесса.
@@ -111,9 +120,10 @@ fn alloc_fd(fds: &mut Vec<Option<OpenFile>>, file: OpenFile) -> i64 {
     }
 }
 
-/// `open(path, flags, mode)` — открывает файл и возвращает дескриптор. Флаги/режим пока
-/// игнорируем (только чтение). `path` — нуль-терминированная строка в памяти пользователя.
-pub fn sys_open(path_ptr: u64) -> i64 {
+/// `open(path, flags, mode)` — открывает файл и возвращает дескриптор. Поддержаны режим доступа
+/// (`O_RDONLY`/`O_WRONLY`/`O_RDWR`), `O_CREAT` (создать, если нет) и `O_TRUNC` (обрезать до нуля
+/// при открытии); `mode` игнорируем. `path` — нуль-терминированная строка в памяти пользователя.
+pub fn sys_open(path_ptr: u64, flags: u64) -> i64 {
     let path = match uaccess::read_user_cstr(path_ptr) {
         Ok(p) => p,
         Err(errno) => return -errno,
@@ -122,11 +132,79 @@ pub fn sys_open(path_ptr: u64) -> i64 {
         Ok(s) => s,
         Err(_) => return -abi::ENOENT,
     };
+
+    let writable = (flags & abi::O_ACCMODE) != abi::O_RDONLY;
+    let create = flags & abi::O_CREAT != 0;
+    let truncate = flags & abi::O_TRUNC != 0;
+
+    // Существующее содержимое (или его отсутствие).
     let data = match crate::fs::open(path) {
-        Ok(d) => d,
+        Ok(existing) => {
+            if truncate {
+                // O_TRUNC: обрезаем на диске сразу (как в Linux — при открытии).
+                if let Err(e) = crate::fs::write_file(path, &[]) {
+                    return -write_errno(e);
+                }
+                Vec::new()
+            } else {
+                existing
+            }
+        }
+        Err(_) if create => {
+            // O_CREAT и файла нет — создаём пустым сразу, чтобы он существовал и без записи.
+            if let Err(e) = crate::fs::write_file(path, &[]) {
+                return -write_errno(e);
+            }
+            Vec::new()
+        }
         Err(_) => return -abi::ENOENT,
     };
-    with_current_fds(|fds| alloc_fd(fds, OpenFile { data, offset: 0 }))
+
+    // На диске содержимое уже согласовано (existing/пустое после create/trunc), поэтому dirty=false
+    // до первой записи.
+    with_current_fds(|fds| {
+        alloc_fd(
+            fds,
+            OpenFile {
+                name: String::from(path),
+                data,
+                offset: 0,
+                writable,
+                dirty: false,
+            },
+        )
+    })
+}
+
+/// `write(fd, buf, count)` в обычный файл (fd ≥ 3, M6g3): копирует `count` байт из памяти
+/// пользователя в буфер файла с текущей позиции (расширяя его при необходимости), сдвигает
+/// позицию и помечает файл «грязным» (сбросится на диск при `close`). `-EBADF`, если дескриптор
+/// неверен или открыт только на чтение.
+pub fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
+    let fd = fd as usize;
+    with_current_fds(|fds| {
+        let file = match fds.get_mut(fd).and_then(|slot| slot.as_mut()) {
+            Some(f) => f,
+            None => return -abi::EBADF,
+        };
+        if !file.writable {
+            return -abi::EBADF;
+        }
+        // Копируем из памяти пользователя в буфер файла (uaccess сам проверит диапазон).
+        match uaccess::with_user_bytes(buf, count, |bytes| {
+            let end = file.offset + bytes.len();
+            if end > file.data.len() {
+                file.data.resize(end, 0);
+            }
+            file.data[file.offset..end].copy_from_slice(bytes);
+            file.offset = end;
+            file.dirty = true;
+            bytes.len() as i64
+        }) {
+            Ok(written) => written,
+            Err(errno) => -errno,
+        }
+    })
 }
 
 /// `read(fd, buf, count)` — копирует до `count` байт файла с текущей позиции в буфер
@@ -156,16 +234,33 @@ pub fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
     })
 }
 
-/// `close(fd)` — освобождает дескриптор.
+/// Преобразует ошибку записи FAT в errno для возврата пользователю.
+fn write_errno(e: crate::fs::fat::FatError) -> i64 {
+    use crate::fs::fat::FatError;
+    match e {
+        FatError::NoSpace | FatError::DirFull => abi::ENOSPC,
+        _ => abi::EIO,
+    }
+}
+
+/// `close(fd)` — освобождает дескриптор, предварительно сбросив изменения на диск (M6g3):
+/// если файл открыт на запись и «грязный», его буфер пишется обратно через `fs::write_file`.
+/// Файл изымаем из таблицы ДО записи — не держим замок `PROCESSES` на время дискового ввода-
+/// вывода. `-EBADF` на неверном дескрипторе; `-EIO`/`-ENOSPC`, если сброс на диск не удался.
 pub fn sys_close(fd: u64) -> i64 {
     let fd = fd as usize;
-    with_current_fds(|fds| match fds.get_mut(fd) {
-        Some(slot) if slot.is_some() => {
-            *slot = None;
-            0
+    // Изымаем открытый файл из таблицы дескрипторов (слот освобождается).
+    let file = with_current_fds(|fds| fds.get_mut(fd).and_then(|slot| slot.take()));
+    let file = match file {
+        Some(f) => f,
+        None => return -abi::EBADF,
+    };
+    if file.writable && file.dirty {
+        if let Err(e) = crate::fs::write_file(&file.name, &file.data) {
+            return -write_errno(e);
         }
-        _ => -abi::EBADF,
-    })
+    }
+    0
 }
 
 /// `lseek(fd, offset, whence)` — двигает позицию чтения; возвращает новую позицию.
