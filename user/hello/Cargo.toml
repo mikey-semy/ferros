@@ -61,6 +61,11 @@ path = "src/writetest.rs"
 name = "lstest"
 path = "src/lstest.rs"
 
+# Проверка stdin (M7a): читает строку с клавиатуры через read(0) и печатает её обратно.
+[[bin]]
+name = "stdintest"
+path = "src/stdintest.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"

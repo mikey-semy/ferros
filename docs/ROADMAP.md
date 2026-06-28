@@ -76,7 +76,17 @@ a real VFS) remains before **M7** (init process + shell).
     `close`), **M6g4 — subdirectories + `mkdir`** (done; path resolution, `.`/`..`), **M6g5 —
     directory listing** (done; `getdents64` → `linux_dirent64`, so `ls` works), M6g6 a real VFS
     layer (optional — internal refactor, deferrable until a second filesystem exists).
-- **M7 — Shell.** init process, interactive shell, basic utilities, line editing.
+- **M7 — init + shell** (in progress). Boot lands in an interactive shell. Decisions: utilities
+  are **external ELF** binaries the shell `fork`+`execve`s (so **argv** is on the early path), and
+  **cwd lives in the kernel** (`chdir`/`getcwd`, inherited across fork/exec). Stages:
+  - **M7a — stdin / console** (done). Line discipline (line-buffered input, echo, backspace) +
+    blocking `read(0)`, wired to the keyboard task; reuses the scheduler's block/wake (like
+    `wait4`). A ring-3 program reads a typed line.
+  - **M7b — argv/envp** on the user stack (`execve` + `spawn_user` build the SysV initial stack).
+  - **M7c — cwd in the kernel** (`chdir`/`getcwd` + relative path resolution).
+  - **M7d — init (PID 1)** + clean boot (drop the demo spam, reap orphans).
+  - **M7e — shell** (REPL: parse argv, fork→execve→wait4; builtins `cd`/`exit`; `$?`).
+  - **M7f — coreutils** in `/bin` (`ls`/`cat`/`echo`/`mkdir`/`pwd`). Redirection/pipes optional after.
 
 ## Tier D — A "real" OS
 
