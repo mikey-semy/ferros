@@ -25,7 +25,7 @@ use crate::mm::addr_space::AddressSpace;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 use x86_64::instructions::interrupts;
 use x86_64::structures::paging::PhysFrame;
@@ -40,6 +40,11 @@ static PREEMPTION_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Раздатчик идентификаторов процессов (PID, M6f1). PID 0 закреплён за «нулевым» потоком
 /// ядра; пользовательские процессы и потоки ядра получают 1, 2, … .
 static NEXT_PID: AtomicU32 = AtomicU32::new(1);
+
+/// Сколько раз процесс блокировался в `read(0)` на пустом вводе (M7a). Наблюдаемость для
+/// теста stdin: он ждёт, пока читатель реально заблокируется, и только потом подаёт ввод —
+/// так детерминированно проверяется весь путь «блок → побудка».
+pub static STDIN_BLOCKS: AtomicU64 = AtomicU64::new(0);
 
 /// Состояние потока в планировщике.
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -60,6 +65,18 @@ enum State {
     /// Остаётся «надгробием» в `Vec` планировщика (структура `Thread` крошечная); уплотнение
     /// `Vec` — позже (HARDENING).
     Reaped,
+}
+
+/// Почему поток в состоянии [`State::Blocked`] — чтобы будить именно тех, кого нужно.
+/// Осмысленно только при `state == Blocked`; в прочих состояниях не используется.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum BlockReason {
+    /// Не заблокирован (или причина не важна).
+    None,
+    /// Ждёт завершения ребёнка в `wait4` (M6f4): будит завершение ребёнка ([`terminate`]).
+    Child,
+    /// Ждёт ввода в `read(0)` (M7a): будит завершённая строка ([`wake_stdin_readers`]).
+    Stdin,
 }
 
 /// Контекст потока: сохранённый указатель стека плюс владение его памятью; для
@@ -91,6 +108,9 @@ struct Thread {
     kernel_stack_top: u64,
     /// Состояние.
     state: State,
+    /// Причина блокировки (осмысленна при `state == Blocked`): по ней побудчик понимает,
+    /// этого ли потока касается событие (завершение ребёнка vs. ввод с консоли).
+    blocked_on: BlockReason,
 }
 
 /// Простой round-robin планировщик.
@@ -123,6 +143,7 @@ pub fn init() {
                 cr3: None,
                 kernel_stack_top: 0,
                 state: State::Runnable,
+                blocked_on: BlockReason::None,
             }],
             current: 0,
             kernel_cr3,
@@ -158,6 +179,7 @@ pub fn spawn(entry: extern "C" fn() -> !) {
         cr3: None,
         kernel_stack_top: top as u64,
         state: State::Runnable,
+        blocked_on: BlockReason::None,
     });
 }
 
@@ -181,6 +203,7 @@ pub fn add_user_task(rsp: u64, cr3: PhysFrame, kernel_stack_top: u64, kstack: Bo
         cr3: Some(cr3),
         kernel_stack_top,
         state: State::Runnable,
+        blocked_on: BlockReason::None,
     });
     pid
 }
@@ -302,11 +325,16 @@ fn terminate(sched: &mut Scheduler, idx: usize, status: i32, signal: Option<u8>)
             t.parent = 0;
         }
     }
-    // Будим родителя, если он заблокирован в `wait` — пусть соберёт статус.
+    // Будим родителя, если он заблокирован именно в `wait` — пусть соберёт статус. Родителя,
+    // заблокированного по другой причине (например, на вводе `read(0)`), не трогаем: он не в
+    // `wait`, ребёнок останется зомби до настоящего `wait4`.
     let parent_pid = sched.threads[idx].parent;
     if parent_pid != 0 {
         for t in sched.threads.iter_mut() {
-            if t.pid == parent_pid && t.state == State::Blocked {
+            if t.pid == parent_pid
+                && t.state == State::Blocked
+                && t.blocked_on == BlockReason::Child
+            {
                 t.state = State::Runnable;
                 break;
             }
@@ -428,6 +456,7 @@ fn try_collect_or_block(want_pid: i64) -> WaitResult {
             .any(|t| is_mine(t) && is_alive(t.state))
         {
             sched.threads[cur].state = State::Blocked;
+            sched.threads[cur].blocked_on = BlockReason::Child;
             WaitResult::WouldBlock
         } else {
             WaitResult::NoChildren
@@ -459,6 +488,46 @@ pub fn wait_current(want_pid: i64) -> Option<(u32, i32, Option<u8>)> {
             }
         }
     }
+}
+
+/// Блокирует ТЕКУЩИЙ процесс в ожидании ввода с консоли (`read(0)`, M7a): метит его
+/// `Blocked` с причиной [`BlockReason::Stdin`] и уступает CPU. Возвращается, когда
+/// [`wake_stdin_readers`] переведёт его обратно в `Runnable` (появилась завершённая строка) —
+/// тогда вызывающий перечитывает буфер консоли.
+///
+/// # Безопасность вызова
+/// Звать **с выключенными прерываниями** (как и положено вокруг [`switch_to_next`]), причём
+/// атомарно с проверкой «ввод пуст»: иначе строка могла бы прийти между проверкой и
+/// блокировкой, и побудка бы потерялась. Корректность блокирующего syscall'а — на собственном
+/// ядровом стеке процесса (как у `wait`, M6f4): уступив из середины вызова, мы не затрём чужой
+/// кадр.
+pub fn block_current_on_stdin() {
+    {
+        let mut guard = SCHEDULER.lock();
+        let sched = guard.as_mut().expect("scheduler not initialized");
+        let cur = sched.current;
+        sched.threads[cur].state = State::Blocked;
+        sched.threads[cur].blocked_on = BlockReason::Stdin;
+    }
+    STDIN_BLOCKS.fetch_add(1, Ordering::SeqCst);
+    // Уступаем CPU; вернёмся сюда, когда побудка переведёт нас в `Runnable`.
+    switch_to_next();
+}
+
+/// Будит все процессы, заблокированные в `read(0)` (M7a): переводит их из `Blocked`/`Stdin`
+/// обратно в `Runnable`. Зовётся консолью при завершении строки (Enter). Разбуженные сами
+/// перечитают буфер; кому ввода не досталось — заблокируются снова (ложная побудка безопасна).
+pub fn wake_stdin_readers() {
+    interrupts::without_interrupts(|| {
+        let mut guard = SCHEDULER.lock();
+        if let Some(sched) = guard.as_mut() {
+            for t in sched.threads.iter_mut() {
+                if t.state == State::Blocked && t.blocked_on == BlockReason::Stdin {
+                    t.state = State::Runnable;
+                }
+            }
+        }
+    });
 }
 
 /// Освобождает ресурсы завершённых потоков: их адресное пространство, стек ядра и таблицу

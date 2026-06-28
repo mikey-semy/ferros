@@ -134,6 +134,21 @@ impl Writer {
         self.write_filtered(s.as_bytes());
     }
 
+    /// Стирает последний символ текущей (нижней) строки: сдвигает курсор на колонку назад и
+    /// затирает ячейку пробелом. Нужно для echo backspace в линейной дисциплине (M7a). В
+    /// начале строки (колонка 0) — ничего не делает (на предыдущую строку не переходим).
+    fn backspace(&mut self) {
+        if self.column > 0 {
+            self.column -= 1;
+            let blank = ScreenChar {
+                ascii: b' ',
+                color: self.color,
+            };
+            // SAFETY: указатель внутри VGA-буфера (нижняя строка, существующая колонка).
+            unsafe { core::ptr::write_volatile(Self::cell(BUFFER_HEIGHT - 1, self.column), blank) };
+        }
+    }
+
     /// Перенос строки: сдвигаем весь экран на строку вверх, нижнюю очищаем.
     fn new_line(&mut self) {
         for row in 1..BUFFER_HEIGHT {
@@ -193,6 +208,15 @@ pub fn _print(args: fmt::Arguments) {
 pub fn write_bytes(bytes: &[u8]) {
     x86_64::instructions::interrupts::without_interrupts(|| {
         WRITER.lock().write_filtered(bytes);
+    });
+}
+
+/// Стирает последний символ нижней строки — echo backspace для линейной дисциплины (M7a).
+/// Замок держим под выключенными прерываниями (то же правило против дедлока, что и в
+/// [`_print`]/[`write_bytes`]).
+pub fn backspace() {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        WRITER.lock().backspace();
     });
 }
 
