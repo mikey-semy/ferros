@@ -342,10 +342,13 @@ pub fn signal(target_pid: u32, sig: u8) -> SignalOutcome {
         let mut guard = SCHEDULER.lock();
         let sched = guard.as_mut().expect("scheduler not initialized");
         let cur = sched.current;
+        // Цель — только живой ПОЛЬЗОВАТЕЛЬСКИЙ процесс (`cr3.is_some()`): сигналы не должны
+        // доставать потоки ядра (у них общий с пользователем диапазон PID, но убивать их из
+        // кольца 3 нельзя). «Нулевой» поток и так отсечён проверкой `pid <= 0` в sys_kill.
         let Some(idx) = sched
             .threads
             .iter()
-            .position(|t| t.pid == target_pid && is_alive(t.state))
+            .position(|t| t.pid == target_pid && t.cr3.is_some() && is_alive(t.state))
         else {
             return Err(SignalOutcome::NoSuchProcess);
         };
