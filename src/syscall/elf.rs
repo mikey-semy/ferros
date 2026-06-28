@@ -52,6 +52,9 @@ pub static KILLTEST_ELF: &[u8] = include_bytes!(env!("USER_KILLTEST_ELF"));
 /// Встроенная проверка записи файлов (M6g3): создаёт/пишет/читает файл через сисколлы.
 pub static WRITETEST_ELF: &[u8] = include_bytes!(env!("USER_WRITETEST_ELF"));
 
+/// Встроенная проверка листинга каталога (M6g5): читает корень через `getdents64`.
+pub static LSTEST_ELF: &[u8] = include_bytes!(env!("USER_LSTEST_ELF"));
+
 /// Почему ELF не удалось загрузить.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfError {
