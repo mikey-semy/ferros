@@ -14,19 +14,23 @@ use alloc::vec::Vec;
 
 /// Открывает файл по пути и возвращает всё его содержимое.
 ///
-/// «VFS» пока вырожденный: единственная ФС — FAT32 на диске; путь — имя файла в корне (8.3),
-/// ведущий `/` игнорируется. Монтируем том на каждый вызов (дёшево: один сектор BPB) и
-/// читаем файл. Кэш/настоящие точки монтирования — позже (HARDENING).
+/// «VFS» пока вырожденный: единственная ФС — FAT32 на диске; путь — `/a/b/file` (компоненты
+/// 8.3), с M6g4 поддержаны подкаталоги. Монтируем том на каждый вызов (дёшево: один сектор BPB)
+/// и читаем файл. Кэш/настоящие точки монтирования — позже (HARDENING).
 pub fn open(path: &str) -> Result<Vec<u8>, fat::FatError> {
-    let name = path.trim_start_matches('/');
     let volume = fat::Fat32::mount()?;
-    volume.read_file(name)
+    volume.read_file(path)
 }
 
-/// Создаёт или перезаписывает файл по пути его содержимым `data` (M6g2). Путь — имя файла в
-/// корне (8.3), ведущий `/` игнорируется. Подкаталоги — позже (M6g3).
+/// Создаёт или перезаписывает файл по пути его содержимым `data` (M6g2). Путь — `/a/b/file`
+/// (компоненты 8.3); родительские каталоги должны существовать (M6g4).
 pub fn write_file(path: &str, data: &[u8]) -> Result<(), fat::FatError> {
-    let name = path.trim_start_matches('/');
     let volume = fat::Fat32::mount()?;
-    volume.write_file(name, data)
+    volume.write_file(path, data)
+}
+
+/// Создаёт каталог по пути (M6g4). Родительские каталоги должны существовать.
+pub fn mkdir(path: &str) -> Result<(), fat::FatError> {
+    let volume = fat::Fat32::mount()?;
+    volume.mkdir(path)
 }

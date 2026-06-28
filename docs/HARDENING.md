@@ -191,13 +191,19 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   file's content without changing the image size won't auto-regenerate (delete the image to
   force it). The test file's name/content are duplicated between `build.rs` and
   `tests/fat_read.rs` (separate crates can't share a const).
-- **FAT is FAT32-only, root-dir-only, 8.3-only (M6c; whole-file write added M6g2).** `fs::fat`
-  reads and now writes (`write_file` creates/overwrites), but only in the **root** directory (no
-  path parsing / subdirectory traversal, though the scan helpers are cluster-generic), only FAT32
-  (rejects FAT12/16), 512-byte sectors, short **8.3** names only (LFN entries skipped, not
-  assembled), whole-file in a `Vec` (no seek/streaming/partial I/O). It re-reads the BPB on every
-  `mount()` and re-reads FAT/dir sectors per call with **no caching** — O(sectors) per lookup. A
-  real VFS + buffer cache + LFN + subdirectories come later.
+- **FAT is FAT32-only, 8.3-only, no LFN/cache (M6c; write M6g2; subdirs M6g4).** `fs::fat` reads
+  and writes (`write_file` creates/overwrites) and now resolves **subdirectory paths** + `mkdir`,
+  but: only FAT32 (rejects FAT12/16), 512-byte sectors, short **8.3** names only (LFN entries
+  skipped, not assembled — so long names are invisible), whole-file in a `Vec` (no
+  seek/streaming/partial I/O). Path resolution is **forward-only**: `.`/`..` components aren't
+  interpreted (they're matched literally as 8.3 names — `..` happens to resolve via the on-disk
+  `..` entry, but `.`/relative paths and `mkdir -p`-style auto-create of parents are not handled).
+  It re-reads the BPB on every `mount()` and re-reads FAT/dir sectors per call with **no
+  caching** — O(sectors) per lookup. A buffer cache + LFN come later.
+- **No directory growth or removal (M6g2/M6g4).** A directory occupies the cluster(s) it has; if
+  its existing slots fill up, creating another entry returns `DirFull` (no dir-cluster extension).
+  A new `mkdir` directory is one cluster (`.`/`..` + room for entries until it fills). There is no
+  `rmdir`/`unlink` (no removal of files or dirs), and `mkdir` requires the parent to already exist.
 - **FAT write is whole-file, not crash-safe, no dir growth / delete (M6g2).** `write_file`
   replaces a file's entire contents (no append/random-write/truncate-to-size); there's no
   `unlink`/delete and no directory **extension** — if the root dir's existing clusters have no
