@@ -46,8 +46,15 @@ static NEXT_PID: AtomicU32 = AtomicU32::new(1);
 enum State {
     /// Готов исполняться.
     Runnable,
-    /// Завершён (`exit`), но ресурсы ещё не освобождены. Планировщик его пропускает; reaper
-    /// (M6e3) позже освободит его память.
+    /// Заблокирован: ждёт события (M6f4: родитель в `wait`, пока не завершится ребёнок).
+    /// Планировщик его пропускает, пока кто-нибудь не переведёт обратно в `Runnable`.
+    Blocked,
+    /// Завершён (`exit`), статус ещё НЕ собран родителем (зомби, M6f4). Планировщик пропускает.
+    /// Reaper освобождает зомби, только если он осиротел (родитель — PID 0); зомби с живым
+    /// родителем ждёт, пока тот соберёт его через `wait` (это переведёт его в `Dead`).
+    Zombie,
+    /// Завершён и статус собран (через `wait` или как осиротевший) — ресурсы ещё не освобождены.
+    /// Планировщик пропускает; reaper (M6e3) освободит его память.
     Dead,
     /// Завершён И освобождён reaper'ом (адресное пространство, стек, дескрипторы возвращены).
     /// Остаётся «надгробием» в `Vec` планировщика (структура `Thread` крошечная); уплотнение
@@ -60,12 +67,10 @@ enum State {
 struct Thread {
     /// Идентификатор процесса (M6f1). 0 — «нулевой» поток ядра.
     pid: u32,
-    /// PID родителя (кто создал этот поток/процесс). 0 — создан ядром на старте. Пишется
-    /// сейчас, читается `wait` (2a4) — отсюда `allow(dead_code)` до тех пор.
-    #[allow(dead_code)]
+    /// PID родителя (кто создал этот поток/процесс). 0 — создан ядром на старте или осиротел
+    /// (родитель завершился). Читается `wait` (кого будить) и reaper (осиротевшие зомби).
     parent: u32,
-    /// Код завершения (`exit`); `None`, пока поток жив. Пишется сейчас, читается `wait` (2a4).
-    #[allow(dead_code)]
+    /// Код завершения (`exit`); `None`, пока поток жив. Собирается родителем через `wait` (M6f4).
     exit_status: Option<i32>,
     /// Сохранённый `rsp` потока (в его ядровом стеке). Обновляется при переключении прочь.
     rsp: u64,
@@ -245,17 +250,122 @@ pub fn exit_current(status: i32) -> ! {
         let mut guard = SCHEDULER.lock();
         let sched = guard.as_mut().expect("scheduler not initialized");
         let cur = sched.current;
+        let my_pid = sched.threads[cur].pid;
         sched.threads[cur].exit_status = Some(status);
-        sched.threads[cur].state = State::Dead;
+        // Зомби, а не сразу Dead: статус ждёт сбора родителем через `wait` (M6f4).
+        sched.threads[cur].state = State::Zombie;
+        // Переусыновляем своих детей ядру (PID 0): осиротевших зомби соберёт reaper, а живые
+        // дети, выйдя, станут зомби с parent 0 и тоже будут собраны (без `wait` от мёртвого
+        // родителя они бы зависли навсегда).
+        for t in sched.threads.iter_mut() {
+            if t.parent == my_pid {
+                t.parent = 0;
+            }
+        }
+        // Будим родителя, если он заблокирован в `wait` — пусть соберёт наш статус.
+        let parent_pid = sched.threads[cur].parent;
+        if parent_pid != 0 {
+            for t in sched.threads.iter_mut() {
+                if t.pid == parent_pid && t.state == State::Blocked {
+                    t.state = State::Runnable;
+                    break;
+                }
+            }
+        }
     } // замок отпускаем здесь — switch_to_next возьмёт его снова
     switch_to_next();
     // switch_to_next ушёл в другой готовый поток; в мёртвый поток уже не вернутся.
     unreachable!("exit_current returned to a dead task");
 }
 
-/// Освобождает ресурсы завершённых (`Dead`) потоков: их адресное пространство, стек ядра и
-/// таблицу дескрипторов. Вызывать из **безопасного контекста** (главный цикл на «нулевом»
-/// потоке, в адресном пространстве ядра, IF=1) — не с мёртвого стека, который освобождаем.
+/// Состояния потока — «живой подходящий ребёнок» для `wait`: ещё исполняется или ждёт.
+fn is_alive(state: State) -> bool {
+    matches!(state, State::Runnable | State::Blocked)
+}
+
+/// Результат одной попытки [`wait_current`] (под замком планировщика).
+enum WaitResult {
+    /// Найден завершившийся ребёнок: его PID и код выхода (он помечен `Dead` — reaper освободит).
+    Collected(u32, i32),
+    /// Подходящих завершившихся нет, но есть живые — текущий помечен `Blocked`, надо уступить CPU.
+    WouldBlock,
+    /// Подходящих детей нет вовсе — `wait` вернёт `-ECHILD`.
+    NoChildren,
+}
+
+/// Одна попытка `wait` ПОД ОДНИМ замком (атомарность скан+`Blocked` исключает потерю
+/// пробуждения): ищет зомби-ребёнка → забирает (метит `Dead`); иначе, если есть живые
+/// подходящие дети → метит текущий `Blocked`; иначе детей нет. `want_pid > 0` — конкретный PID,
+/// иначе любой ребёнок.
+fn try_collect_or_block(want_pid: i64) -> WaitResult {
+    interrupts::without_interrupts(|| {
+        let mut guard = SCHEDULER.lock();
+        let sched = guard.as_mut().expect("scheduler not initialized");
+        let cur = sched.current;
+        let cur_pid = sched.threads[cur].pid;
+        let want = if want_pid > 0 {
+            Some(want_pid as u32)
+        } else {
+            None
+        };
+        let is_mine = |t: &Thread| t.parent == cur_pid && want.is_none_or(|p| t.pid == p);
+
+        // 1) Завершившийся (зомби) подходящий ребёнок → собираем его статус.
+        let zombie = sched
+            .threads
+            .iter()
+            .position(|t| is_mine(t) && t.state == State::Zombie);
+        if let Some(i) = zombie {
+            let child_pid = sched.threads[i].pid;
+            let status = sched.threads[i].exit_status.unwrap_or(0);
+            sched.threads[i].state = State::Dead; // статус собран → reaper освободит
+            return WaitResult::Collected(child_pid, status);
+        }
+
+        // 2) Есть живой подходящий ребёнок → блокируемся до его завершения.
+        if sched
+            .threads
+            .iter()
+            .any(|t| is_mine(t) && is_alive(t.state))
+        {
+            sched.threads[cur].state = State::Blocked;
+            WaitResult::WouldBlock
+        } else {
+            WaitResult::NoChildren
+        }
+    })
+}
+
+/// Ждёт завершения ребёнка текущего процесса (M6f4). `want_pid > 0` — конкретный PID, иначе
+/// любой. Возвращает `Some((pid, код_выхода))` собранного ребёнка или `None`, если детей нет
+/// (`-ECHILD`). Блокирует вызывающего (уступая CPU), пока подходящий ребёнок не завершится.
+///
+/// Блокировка корректна только потому, что `syscall` теперь идёт на СВОЁМ ядровом стеке
+/// процесса (M6f4): уступив CPU из середины вызова, мы не затираем чужой кадр на общем стеке.
+pub fn wait_current(want_pid: i64) -> Option<(u32, i32)> {
+    loop {
+        match try_collect_or_block(want_pid) {
+            WaitResult::Collected(pid, status) => return Some((pid, status)),
+            WaitResult::NoChildren => return None,
+            WaitResult::WouldBlock => {
+                // Текущий помечен `Blocked` (атомарно со сканом). Уступаем CPU; вернёмся сюда,
+                // когда завершившийся ребёнок переведёт нас обратно в `Runnable`, и пересканим.
+                let was_enabled = interrupts::are_enabled();
+                interrupts::disable();
+                switch_to_next();
+                if was_enabled {
+                    interrupts::enable();
+                }
+            }
+        }
+    }
+}
+
+/// Освобождает ресурсы завершённых потоков: их адресное пространство, стек ядра и таблицу
+/// дескрипторов. Это собранные родителем (`Dead`) и осиротевшие зомби (`Zombie` с родителем
+/// PID 0 — их статус уже некому собрать через `wait`). Вызывать из **безопасного контекста**
+/// (главный цикл на «нулевом» потоке, в адресном пространстве ядра, IF=1) — не с мёртвого
+/// стека, который освобождаем.
 ///
 /// Не уплотняет `Vec`: обработанный поток помечается `Reaped` и остаётся «надгробием» (его
 /// структура крошечная) — так не нужно двигать индекс `current`/переключение. Большие
@@ -279,7 +389,12 @@ pub fn reap() {
         if let Some(sched) = guard.as_mut() {
             let cur = sched.current;
             for (i, t) in sched.threads.iter_mut().enumerate() {
-                if i != cur && t.state == State::Dead {
+                // Освобождаем собранные (`Dead`) и осиротевшие зомби (родитель — PID 0: их
+                // статус уже некому собирать через `wait`). Зомби с живым родителем не трогаем —
+                // ждём, пока тот соберёт его (`wait` переведёт в `Dead`).
+                let collectable =
+                    t.state == State::Dead || (t.state == State::Zombie && t.parent == 0);
+                if i != cur && collectable {
                     corpses.push((t.cr3.take(), t.stack.take()));
                     t.state = State::Reaped;
                 }

@@ -68,10 +68,14 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
 
 ## M5 — userspace + syscalls
 
-- **Single global syscall stack, no `swapgs`/per-CPU.** The `syscall` entry trampoline
-  switches to one global kernel stack via a RIP-relative static — correct only for a
-  single core and non-reentrant syscalls (we enter with IF=0). Real userspace needs a
-  per-CPU kernel stack selected via `swapgs` + `GS` base, and per-thread kernel stacks.
+- **Syscall kernel stack is per-process now, but still no `swapgs`/per-CPU (M5a → M6f4).**
+  The `syscall` entry trampoline switches to a kernel stack via a RIP-relative static. M6f4
+  made that static **per-process** (the scheduler points it at the current task's own kernel
+  stack on each switch) so a blocking syscall (`wait`) can yield mid-call without corrupting
+  another process's frame on a shared stack. Still single-CPU: real SMP needs a *per-CPU* stack
+  selected via `swapgs` + `GS` base. Also the per-process kernel stack is now shared by ring-3
+  interrupts *and* syscalls (mutually exclusive in time on one core — IF=0 syscalls don't nest
+  with ring-3 interrupts — but a tighter design might separate them).
 - **User faults panic the kernel.** The page-fault / GPF handlers (M5a) `panic!` — fine
   while there are no processes, but once M5c loads real programs a user fault must
   terminate *the process*, not the kernel (and eventually become a signal).
@@ -245,9 +249,20 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   kernel. Needs allocation-failure plumbing (the `None` arm already handles "allocator not
   installed"; this is the genuine-exhaustion arm).
 - **`fork` is the whole `clone` surface (M6f3).** No `clone`/threads (`CLONE_VM` etc.), no
-  `vfork`, no `argv`/`envp` to the child beyond what's already in its copied memory. `fork` also
-  has no `wait` partner yet (M6f4): the child becomes `Dead` and the reaper frees it without the
-  parent collecting a status — zombies + `wait4` are next.
+  `vfork`, no `argv`/`envp` to the child beyond what's already in its copied memory.
+
+- **`wait4` is minimal (M6f4).** Supports `pid == -1` (any child) and `pid > 0` (specific);
+  `options` (no `WNOHANG`/`WUNTRACED`), `rusage`, and process groups (`pid == 0` / `pid < -1`)
+  are ignored/unsupported. Status encodes only normal `exit` (`(code & 0xff) << 8`) — no
+  signal-termination encoding yet (comes with M6f5). The blocking `wait` busy-cycles through the
+  scheduler (parent `Blocked`, woken by the child's `exit`) — correct, but there's no wait-queue;
+  a process waiting on many children rescans the whole thread table each wakeup.
+- **Orphan zombies are reparented to the kernel (PID 0), not a real `init` (M6f4).** When a
+  process exits, its children are reparented to PID 0 and the reaper collects PID-0 zombies
+  (discarding their status). A proper `init` (PID 1) that adopts orphans and `wait`s them comes
+  with M7. Also: a process that `fork`s but never `wait`s leaks its child as a zombie only until
+  it itself exits (then the child is reparented + reaped) — fine for now, but a long-lived
+  non-waiting parent accumulates zombies.
 
 ## Cross-cutting (whole kernel)
 
