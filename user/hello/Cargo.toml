@@ -66,6 +66,17 @@ path = "src/lstest.rs"
 name = "stdintest"
 path = "src/stdintest.rs"
 
+# Проверка argv (M7b): читает argc/argv с начального стека; запускается через execve из execargv.
+# Кладётся на диск как ARGVECHO; в ядро НЕ встраивается.
+[[bin]]
+name = "argvecho"
+path = "src/argvecho.rs"
+
+# Запускатель (M7b): execve("ARGVECHO", [..]) — проверяет передачу argv через execve.
+[[bin]]
+name = "execargv"
+path = "src/execargv.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"

@@ -29,6 +29,8 @@ fn main() {
         "src/writetest.rs",
         "src/lstest.rs",
         "src/stdintest.rs",
+        "src/argvecho.rs",
+        "src/execargv.rs",
         "Cargo.toml",
         "Cargo.lock",
         "linker.ld",
@@ -52,6 +54,7 @@ fn main() {
         ("writetest", "USER_WRITETEST_ELF"),
         ("lstest", "USER_LSTEST_ELF"),
         ("stdintest", "USER_STDINTEST_ELF"),
+        ("execargv", "USER_EXECARGV_ELF"),
     ];
 
     // Удаляем прошлые ELF перед сборкой: cargo не отслеживает linker.ld / target.json как
@@ -62,6 +65,10 @@ fn main() {
     for (bin, _) in binaries {
         let _ = std::fs::remove_file(format!("{out_dir}/{bin}"));
     }
+    // `argvecho` собирается, но в ядро не встраивается (только кладётся на диск) — в списке
+    // `binaries` его нет, поэтому удаляем его ELF отдельно, чтобы изменения linker.ld/target
+    // тоже принудительно перелинковали его.
+    let _ = std::fs::remove_file(format!("{out_dir}/argvecho"));
 
     let mut cmd = Command::new("cargo");
     cmd.current_dir(user_dir).args(["build", "--release"]);
@@ -114,8 +121,8 @@ const FAT_TEST_FILE: &str = "HELLO.TXT";
 const FAT_TEST_CONTENT: &[u8] = b"ferros M6c: hello from FAT32!\n";
 
 /// Версия содержимого образа (пишется в BS_VolID при форматировании). Бамп при изменении
-/// набора файлов/содержимого → образ пересоздаётся, хотя размер прежний.
-const DISK_VERSION: u32 = 2;
+/// набора файлов/содержимого → образ пересоздаётся, хотя размер прежний. v3: добавлен ARGVECHO (M7b).
+const DISK_VERSION: u32 = 3;
 
 /// Создаёт тестовый образ диска (M6c/M6f2): форматирует его как **FAT32** и кладёт тестовый
 /// файл плюс пользовательские ELF-программы (для `execve` по пути — M6f2). Образ —
@@ -176,6 +183,18 @@ fn generate_disk_image(manifest: &str) {
         prog.write_all(&hello_bytes)
             .expect("write HELLO on disk image");
         prog.flush().expect("flush HELLO on disk image");
+
+        // Программа `argvecho` на диске под `execve` с аргументами (имя 8.3 `ARGVECHO`, M7b).
+        let argvecho_elf =
+            PathBuf::from(manifest).join("user/hello/target/x86_64-user/release/argvecho");
+        let argvecho_bytes = std::fs::read(&argvecho_elf)
+            .unwrap_or_else(|e| panic!("read {} for disk image: {e}", argvecho_elf.display()));
+        let mut prog = root
+            .create_file("ARGVECHO")
+            .expect("create ARGVECHO on disk image");
+        prog.write_all(&argvecho_bytes)
+            .expect("write ARGVECHO on disk image");
+        prog.flush().expect("flush ARGVECHO on disk image");
     }
 
     if let Some(parent) = disk.parent() {
