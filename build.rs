@@ -31,6 +31,7 @@ fn main() {
         "src/stdintest.rs",
         "src/argvecho.rs",
         "src/execargv.rs",
+        "src/cwdtest.rs",
         "Cargo.toml",
         "Cargo.lock",
         "linker.ld",
@@ -55,6 +56,7 @@ fn main() {
         ("lstest", "USER_LSTEST_ELF"),
         ("stdintest", "USER_STDINTEST_ELF"),
         ("execargv", "USER_EXECARGV_ELF"),
+        ("cwdtest", "USER_CWDTEST_ELF"),
     ];
 
     // Удаляем прошлые ELF перед сборкой: cargo не отслеживает linker.ld / target.json как
@@ -121,8 +123,9 @@ const FAT_TEST_FILE: &str = "HELLO.TXT";
 const FAT_TEST_CONTENT: &[u8] = b"ferros M6c: hello from FAT32!\n";
 
 /// Версия содержимого образа (пишется в BS_VolID при форматировании). Бамп при изменении
-/// набора файлов/содержимого → образ пересоздаётся, хотя размер прежний. v3: добавлен ARGVECHO (M7b).
-const DISK_VERSION: u32 = 3;
+/// набора файлов/содержимого → образ пересоздаётся, хотя размер прежний. v3: ARGVECHO (M7b);
+/// v4: каталог SUB + SUB/INSIDE.TXT (M7c).
+const DISK_VERSION: u32 = 4;
 
 /// Создаёт тестовый образ диска (M6c/M6f2): форматирует его как **FAT32** и кладёт тестовый
 /// файл плюс пользовательские ELF-программы (для `execve` по пути — M6f2). Образ —
@@ -195,6 +198,18 @@ fn generate_disk_image(manifest: &str) {
         prog.write_all(&argvecho_bytes)
             .expect("write ARGVECHO on disk image");
         prog.flush().expect("flush ARGVECHO on disk image");
+
+        // Каталог SUB с файлом INSIDE.TXT под проверку cwd (M7c): относительный open из /SUB.
+        let sub = root
+            .create_dir("SUB")
+            .expect("create SUB dir on disk image");
+        let mut inside = sub
+            .create_file("INSIDE.TXT")
+            .expect("create SUB/INSIDE.TXT on disk image");
+        inside
+            .write_all(b"inside SUB\n")
+            .expect("write SUB/INSIDE.TXT on disk image");
+        inside.flush().expect("flush SUB/INSIDE.TXT on disk image");
     }
 
     if let Some(parent) = disk.parent() {
