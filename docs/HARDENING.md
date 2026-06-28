@@ -203,12 +203,16 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   `unlink`/delete and no directory **extension** — if the root dir's existing clusters have no
   free 32-byte slot, it returns `DirFull` instead of allocating another dir cluster. Free-cluster
   search is a linear FAT scan from cluster 2 with **no FSInfo / next-free hint** (O(FAT) per
-  allocation; a multi-cluster file rescans from the start each cluster). Crucially it is **not
-  crash-consistent**: `write_file` does many independent sector writes (free old chain → alloc new
-  → write data → update dir entry) with no journaling/ordering barriers, so a crash or power loss
-  mid-write can leave the FS inconsistent (lost/cross-linked clusters, a dir entry pointing at a
-  half-written chain). Directory timestamps are written as zero. A real FS needs ordered writes /
-  journaling, an allocation cursor, and dir growth.
+  allocation; a multi-cluster file rescans from the start each cluster). The ordering is
+  *failure-safe within the API* (build new chain + data → commit the dir entry → only then free
+  the old chain; a `NoSpace`/device error before commit rolls back the new chain and leaves the
+  existing file intact), but it is **not crash-consistent across power loss**: the commit is a
+  single non-barriered sector write and the post-commit free of the old chain is a separate write,
+  so a crash at the wrong moment can still leak clusters (and, on real hardware without a flush
+  barrier, reorder). Because new clusters are allocated while the old chain is still live, an
+  overwrite needs room for both copies at once (can `NoSpace` even when in-place would fit).
+  Directory timestamps are written as zero. A real FS needs ordered writes / journaling, an
+  allocation cursor, and dir growth.
 - **FAT reader trusts a well-formed image (M6c).** It now bounds cluster numbers to the
   volume (`valid_cluster`, prevents sector-address overflow / wild reads) and caps chain
   traversal (prevents a cyclic-chain hang), but it still **trusts the directory's file size**:

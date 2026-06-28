@@ -294,12 +294,22 @@ impl Fat32 {
     }
 
     /// Выделяет цепочку из `n` кластеров (n ≥ 1), связывает их и возвращает первый. Последний
-    /// помечен EOC (его ставит [`Self::alloc_cluster`]).
+    /// помечен EOC (его ставит [`Self::alloc_cluster`]). При нехватке места (`NoSpace`)
+    /// освобождает уже выделенную часть — частичная цепочка не утекает.
     fn alloc_chain(&self, n: u32) -> Result<u32, FatError> {
         let mut first = 0u32;
         let mut prev = 0u32;
         for _ in 0..n {
-            let c = self.alloc_cluster()?;
+            let c = match self.alloc_cluster() {
+                Ok(c) => c,
+                Err(e) => {
+                    // Откат: возвращаем уже выделенную часть цепочки в пул.
+                    if first != 0 {
+                        let _ = self.free_chain(first);
+                    }
+                    return Err(e);
+                }
+            };
             if first == 0 {
                 first = c;
             } else {
@@ -434,39 +444,56 @@ impl Fat32 {
     }
 
     /// Создаёт или перезаписывает файл `name` (8.3) в корневом каталоге его содержимым `data`.
-    /// Перезапись освобождает старую цепочку. Пустой файл → первый кластер 0 (как в FAT).
+    /// Пустой файл → первый кластер 0 (как в FAT).
+    ///
+    /// Порядок безопасной замены: СНАЧАЛА строим новое содержимое (новая цепочка + данные),
+    /// ПОТОМ одним обновлением записи каталога переключаем файл на него (коммит), и лишь ЗАТЕМ
+    /// освобождаем старую цепочку. Поэтому сбой (нет места / ошибка диска) до коммита оставляет
+    /// СТАРЫЙ файл нетронутым, а свежая цепочка откатывается — провал записи не разрушает файл.
+    /// Заодно это гарантирует, что новые кластеры не пересекаются со старыми (старые в момент
+    /// выделения ещё заняты).
     pub fn write_file(&self, name: &str, data: &[u8]) -> Result<(), FatError> {
         let target = short_name_83(name);
 
-        // 1) Существующая запись (под перезапись) или свободный слот (под создание).
+        // 1) Существующая запись (под перезапись, с её первым кластером) или свободный слот.
         let (slot_sector, slot_offset, old_first) =
             self.locate_or_free_slot(self.root_cluster, &target)?;
 
-        // 2) Перезапись — освобождаем старую цепочку, чтобы её кластеры вернулись в пул.
-        if let Some(first) = old_first {
-            if self.valid_cluster(first) {
-                self.free_chain(first)?;
-            }
-        }
-
-        // 3) Выделяем цепочку нужной длины и пишем в неё данные (пустой файл — без кластеров).
+        // 2) Строим новое содержимое, НЕ трогая существующий файл (пустой файл — без кластеров).
         let cluster_bytes = self.sectors_per_cluster as usize * SECTOR_SIZE;
-        let first_cluster = if data.is_empty() {
+        let new_first = if data.is_empty() {
             0
         } else {
             let n = data.len().div_ceil(cluster_bytes) as u32;
             let first = self.alloc_chain(n)?;
-            self.write_chain(first, data)?;
+            if let Err(e) = self.write_chain(first, data) {
+                let _ = self.free_chain(first); // откат свежей цепочки
+                return Err(e);
+            }
             first
         };
 
-        // 4) Записываем запись каталога (имя/первый кластер/размер).
-        self.write_dir_entry(
+        // 3) КОММИТ: переключаем запись каталога на новое содержимое. До этого файл — старый.
+        if let Err(e) = self.write_dir_entry(
             slot_sector,
             slot_offset,
             &target,
-            first_cluster,
+            new_first,
             data.len() as u32,
-        )
+        ) {
+            if new_first != 0 {
+                let _ = self.free_chain(new_first); // запись не закоммитилась — откат
+            }
+            return Err(e);
+        }
+
+        // 4) Старое содержимое больше ни на что не ссылается — освобождаем (best-effort: его
+        //    провал лишь оставит старые кластеры неиспользуемыми, файл уже корректно новый).
+        if let Some(first) = old_first {
+            if self.valid_cluster(first) {
+                let _ = self.free_chain(first);
+            }
+        }
+        Ok(())
     }
 }
