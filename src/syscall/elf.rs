@@ -62,6 +62,9 @@ pub static STDINTEST_ELF: &[u8] = include_bytes!(env!("USER_STDINTEST_ELF"));
 /// передачу argv через execve. Целевой `ARGVECHO` лежит на диске.
 pub static EXECARGV_ELF: &[u8] = include_bytes!(env!("USER_EXECARGV_ELF"));
 
+/// Встроенная проверка cwd (M7c): `getcwd`/`chdir`/относительный `open`/`..` вокруг каталога SUB.
+pub static CWDTEST_ELF: &[u8] = include_bytes!(env!("USER_CWDTEST_ELF"));
+
 /// Почему ELF не удалось загрузить.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfError {

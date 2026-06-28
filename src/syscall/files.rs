@@ -54,8 +54,29 @@ struct OpenFile {
     is_dir: bool,
 }
 
-/// Реестр таблиц дескрипторов по процессам: ключ — физический адрес PML4 (CR3) процесса.
-static PROCESSES: Mutex<BTreeMap<u64, Vec<Option<OpenFile>>>> = Mutex::new(BTreeMap::new());
+/// Состояние процесса в файловом слое: таблица дескрипторов и текущий рабочий каталог (M7c).
+/// `Clone` — для `fork` (ребёнок получает независимую копию обоих). Живёт в [`PROCESSES`] под
+/// ключом CR3, поэтому cwd сам наследуется при `fork` ([`fork_fds`]), переживает `execve`
+/// ([`rekey_process`]) и убирается на `exit` ([`forget_process`]) — теми же хуками, что и fd.
+#[derive(Clone)]
+struct ProcState {
+    /// Таблица открытых файлов (индекс = fd).
+    fds: Vec<Option<OpenFile>>,
+    /// Текущий рабочий каталог — нормализованный абсолютный путь (всегда с ведущим `/`).
+    cwd: String,
+}
+
+impl Default for ProcState {
+    fn default() -> Self {
+        ProcState {
+            fds: Vec::new(),
+            cwd: String::from("/"), // новый процесс стартует в корне
+        }
+    }
+}
+
+/// Реестр состояний процессов: ключ — физический адрес PML4 (CR3) процесса.
+static PROCESSES: Mutex<BTreeMap<u64, ProcState>> = Mutex::new(BTreeMap::new());
 
 /// Забывает таблицу дескрипторов завершённого процесса (по физ. адресу его PML4). Зовёт
 /// reaper (M6e3) при освобождении процесса. Теперь это не просто уборка, а **корректность**:
@@ -69,23 +90,24 @@ pub fn process_count() -> usize {
     PROCESSES.lock().len()
 }
 
-/// Переносит таблицу дескрипторов с ключа `old_cr3` на `new_cr3` — для `execve` (M6f2):
-/// дескрипторы переживают exec, но ключом служит CR3, а он при exec меняется.
+/// Переносит состояние процесса (fd-таблица + cwd) с ключа `old_cr3` на `new_cr3` — для `execve`
+/// (M6f2): дескрипторы и рабочий каталог переживают exec, но ключом служит CR3, а он при exec
+/// меняется.
 pub fn rekey_process(old_cr3: u64, new_cr3: u64) {
     let mut procs = PROCESSES.lock();
-    if let Some(table) = procs.remove(&old_cr3) {
-        procs.insert(new_cr3, table);
+    if let Some(state) = procs.remove(&old_cr3) {
+        procs.insert(new_cr3, state);
     }
 }
 
-/// Клонирует таблицу дескрипторов процесса `parent_cr3` для ребёнка `child_cr3` — для `fork`
-/// (M6f3): ребёнок наследует независимые копии открытых файлов родителя (каждая со своим
-/// содержимым и позицией). Если у родителя таблицы ещё нет (ни одного `open`), у ребёнка её
-/// тоже не будет (создастся при первом обращении).
+/// Клонирует состояние процесса `parent_cr3` для ребёнка `child_cr3` — для `fork` (M6f3):
+/// ребёнок наследует независимые копии открытых файлов (каждая со своим содержимым и позицией)
+/// И текущий рабочий каталог (M7c). Если у родителя записи ещё нет (ни одного `open`/`chdir`),
+/// у ребёнка её тоже не будет (создастся дефолтной — cwd `/` — при первом обращении).
 pub fn fork_fds(parent_cr3: u64, child_cr3: u64) {
     let mut procs = PROCESSES.lock();
-    if let Some(table) = procs.get(&parent_cr3).cloned() {
-        procs.insert(child_cr3, table);
+    if let Some(state) = procs.get(&parent_cr3).cloned() {
+        procs.insert(child_cr3, state);
     }
 }
 
@@ -96,13 +118,59 @@ fn current_key() -> u64 {
         .as_u64()
 }
 
-/// Выполняет `f` над таблицей дескрипторов текущего процесса (создаёт пустую при первом
-/// обращении). Безопасно без `without_interrupts`: реестр не трогают обработчики прерываний,
-/// а syscall идёт с IF=0 (не реентерабелен).
-fn with_current_fds<R>(f: impl FnOnce(&mut Vec<Option<OpenFile>>) -> R) -> R {
+/// Выполняет `f` над состоянием текущего процесса (создаёт дефолтное — пустые fd, cwd `/` — при
+/// первом обращении). Безопасно без `without_interrupts`: реестр не трогают обработчики
+/// прерываний, а syscall идёт с IF=0 (не реентерабелен).
+fn with_current_proc<R>(f: impl FnOnce(&mut ProcState) -> R) -> R {
     let key = current_key();
     let mut guard = PROCESSES.lock();
     f(guard.entry(key).or_default())
+}
+
+/// Выполняет `f` над таблицей дескрипторов текущего процесса (через [`with_current_proc`]).
+fn with_current_fds<R>(f: impl FnOnce(&mut Vec<Option<OpenFile>>) -> R) -> R {
+    with_current_proc(|p| f(&mut p.fds))
+}
+
+/// Текущий рабочий каталог процесса — нормализованный абсолютный путь (M7c). По умолчанию `/`.
+fn current_cwd() -> String {
+    with_current_proc(|p| p.cwd.clone())
+}
+
+/// Превращает пользовательский путь в нормализованный абсолютный (M7c): относительный (без
+/// ведущего `/`) достраивается от текущего cwd, затем `.`/`..`/повторные `/` схлопываются.
+/// FAT-слой `.`/`..` не понимает (сопоставляет имена как 8.3), поэтому разрешаем их здесь — до
+/// обращения к ФС. Результат всегда начинается с `/`.
+pub fn resolve_path(path: &str) -> String {
+    if path.starts_with('/') {
+        normalize(path)
+    } else {
+        let mut combined = current_cwd();
+        if !combined.ends_with('/') {
+            combined.push('/');
+        }
+        combined.push_str(path);
+        normalize(&combined)
+    }
+}
+
+/// Схлопывает путь: убирает пустые компоненты (`//`), `.` (текущий каталог) и `..` (вверх, с
+/// зажимом на корне — выше `/` не уходим). Возвращает `/` для корня, иначе `/a/b/…` без
+/// хвостового слэша.
+fn normalize(path: &str) -> String {
+    let mut comps: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {} // пусто (из `//` или краёв) и `.` — пропускаем
+            ".." => {
+                comps.pop(); // вверх; на корне (пусто) — no-op
+            }
+            p => comps.push(p),
+        }
+    }
+    let mut out = String::from("/");
+    out.push_str(&comps.join("/"));
+    out
 }
 
 /// Кладёт открытый файл в первый свободный дескриптор ≥ [`FIRST_FD`]. Возвращает fd или
@@ -137,6 +205,13 @@ pub fn sys_open(path_ptr: u64, flags: u64) -> i64 {
         Ok(s) => s,
         Err(_) => return -abi::ENOENT,
     };
+    if path.is_empty() {
+        return -abi::ENOENT; // пустой путь — `-ENOENT`, как в Linux (а не «открыть cwd»)
+    }
+    // Относительный путь → абсолютный от cwd, `.`/`..` разрешены (M7c). Дальше по ФС идёт уже
+    // абсолютный путь; его же запоминаем в дескрипторе (`close` пишет обратно по нему).
+    let path = resolve_path(path);
+    let path = path.as_str();
 
     let writable = (flags & abi::O_ACCMODE) != abi::O_RDONLY;
     let create = flags & abi::O_CREAT != 0;
@@ -196,6 +271,51 @@ pub fn sys_open(path_ptr: u64, flags: u64) -> i64 {
     };
 
     with_current_fds(|fds| alloc_fd(fds, open_file))
+}
+
+/// `chdir(path)` (M7c): меняет текущий рабочий каталог процесса. Путь резолвится от cwd и должен
+/// указывать на существующий **каталог**. `-ENOTDIR`, если это файл; `-ENOENT`, если пути нет;
+/// иначе соответствующий `-errno`.
+pub fn sys_chdir(path_ptr: u64) -> i64 {
+    let path = match uaccess::read_user_cstr(path_ptr) {
+        Ok(p) => p,
+        Err(errno) => return -errno,
+    };
+    let path = match core::str::from_utf8(&path) {
+        Ok(s) => s,
+        Err(_) => return -abi::ENOENT,
+    };
+    if path.is_empty() {
+        return -abi::ENOENT; // пустой путь — `-ENOENT`, как в Linux
+    }
+    let resolved = resolve_path(path);
+    // Каталог должен существовать: один `lookup` скажет, файл это или каталог.
+    match crate::fs::lookup(&resolved) {
+        Ok(crate::fs::fat::Node::Dir(_)) => {
+            with_current_proc(|p| p.cwd = resolved);
+            0
+        }
+        Ok(crate::fs::fat::Node::File(_)) => -abi::ENOTDIR,
+        Err(crate::fs::fat::FatError::NotFound) => -abi::ENOENT,
+        Err(e) => -fat_errno(e),
+    }
+}
+
+/// `getcwd(buf, size)` (M7c): копирует текущий рабочий каталог (с завершающим нулём) в буфер
+/// пользователя. Возвращает число записанных байт включая нуль (как сырой Linux-`getcwd`);
+/// `-ERANGE`, если не влезает в `size`; `-EFAULT` на недоступном буфере.
+pub fn sys_getcwd(buf: u64, size: u64) -> i64 {
+    let cwd = current_cwd();
+    let needed = cwd.len() + 1; // +1 под завершающий нуль
+    if (size as usize) < needed {
+        return -abi::ERANGE;
+    }
+    let mut out = cwd.into_bytes();
+    out.push(0); // нуль-терминатор
+    match uaccess::copy_to_user(buf, &out) {
+        Ok(()) => needed as i64,
+        Err(errno) => -errno,
+    }
 }
 
 /// `getdents64(fd, buf, count)` — копирует записи каталога (М6g5) в буфер пользователя. Записи
