@@ -71,8 +71,9 @@ a real VFS) remains before **M7** (init process + shell).
     reports `WIFSIGNALED`).
   - **M6g — Filesystem breadth** (in progress). Write support across the stack. Stages:
     **M6g1 — virtio-blk sector write** (done; `write_sector` via DMA, `VIRTIO_BLK_T_OUT`),
-    M6g2 FAT write (free-cluster alloc + chain extend + dir entries; `write(fd)` + `O_CREAT`),
-    M6g3 subdirectories + `mkdir`, M6g4 directory listing (`getdents`), M6g5 a real VFS layer.
+    **M6g2 — FAT file write** (done; `fs::write_file` — free-cluster alloc + chain link + dir
+    entry, mirrored to all FATs), M6g3 `write(fd)`/`O_CREAT` syscalls, M6g4 subdirectories +
+    `mkdir`, M6g5 directory listing (`getdents`), M6g6 a real VFS layer.
 - **M7 — Shell.** init process, interactive shell, basic utilities, line editing.
 
 ## Tier D — A "real" OS
