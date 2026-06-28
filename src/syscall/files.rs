@@ -23,6 +23,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
+use x86_64::instructions::interrupts;
 
 /// Верхняя граница числа дескрипторов на процесс.
 const MAX_FDS: usize = 16;
@@ -298,9 +299,13 @@ pub fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
     })
 }
 
-/// `read(fd, buf, count)` — копирует до `count` байт файла с текущей позиции в буфер
-/// пользователя, сдвигает позицию, возвращает число прочитанных байт (0 — конец файла).
+/// `read(fd, buf, count)` — копирует до `count` байт в буфер пользователя. `fd == 0` (stdin,
+/// M7a) читает с консоли (блокируется до строки); `fd ≥ 3` — из открытого файла с текущей
+/// позиции (сдвигая её). Возвращает число прочитанных байт (0 — конец файла).
 pub fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
+    if fd == 0 {
+        return read_stdin(buf, count);
+    }
     let fd = fd as usize;
     let count = count as usize;
     with_current_fds(|fds| {
@@ -327,6 +332,44 @@ pub fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
             Err(errno) => -errno,
         }
     })
+}
+
+/// `read(0, buf, count)` со stdin (M7a): отдаёт пользователю ввод с консоли построчно. Если
+/// готового ввода нет — **блокирует** процесс, пока линейная дисциплина не завершит строку
+/// (Enter), затем перечитывает. Возвращает число скопированных байт (≥ 1 при успехе).
+///
+/// Развязка «потерянной побудки»: проверку «ввод пуст?» и установку `Blocked` делаем в одной
+/// области с выключенными прерываниями (на одном ядре никто не вклинится между ними), поэтому
+/// строка, пришедшая после проверки, не «проскочит» мимо засыпающего читателя. Копирование в
+/// пользователя — уже вне этой области (syscall и так идёт с IF=0; держать его дольше незачем).
+fn read_stdin(buf: u64, count: u64) -> i64 {
+    if count == 0 {
+        return 0;
+    }
+    let count = count as usize;
+    loop {
+        // Атомарно: забрать готовое ИЛИ, если пусто, заблокироваться и уступить CPU.
+        let bytes = interrupts::without_interrupts(|| {
+            let bytes = crate::drivers::console::take_ready(count);
+            if bytes.is_empty() {
+                crate::sched::thread::block_current_on_stdin();
+                None // разбудили — внешний цикл перечитает
+            } else {
+                Some(bytes)
+            }
+        });
+        if let Some(bytes) = bytes {
+            return match uaccess::copy_to_user(buf, &bytes) {
+                Ok(()) => bytes.len() as i64,
+                // Буфер пользователя плох: не теряем уже снятую с очереди строку — возвращаем её
+                // в начало буфера, чтобы следующий `read` её получил (как `EFAULT` в Linux).
+                Err(errno) => {
+                    crate::drivers::console::unread(bytes);
+                    -errno
+                }
+            };
+        }
+    }
 }
 
 /// Преобразует ошибку FAT в errno для возврата пользователю.

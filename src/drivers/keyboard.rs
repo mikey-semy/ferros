@@ -8,18 +8,21 @@
 //! может разрастись (раскладки, Unicode, мёртвые клавиши).
 //!
 //! Решение: обработчик прерывания только **складывает байт в очередь и будит задачу**
-//! (быстро, без аллокаций), а тяжёлую работу делает async-задача [`print_keypresses`],
+//! (быстро, без аллокаций), а тяжёлую работу делает async-задача [`process_input`],
 //! которая спит, пока ввода нет. Так waker'ы из M4b впервые работают «по-настоящему»:
 //! пробуждение приходит из обработчика прерывания.
+//!
+//! С M7a задача больше не печатает символы сама, а кормит ими **линейную дисциплину**
+//! ([`super::console`]) — оттуда их заберёт `read(0)` из кольца 3 (echo делает консоль).
 //!
 //! ```text
 //!   IRQ(keyboard) -> add_scancode(byte) -> queue.push + WAKER.wake()
 //!                                                          |
-//!   executor:  poll(print_keypresses) <--- разбудили <----+
-//!              -> ScancodeStream pops byte -> декод -> печать
+//!   executor:  poll(process_input) <--- разбудили <-------+
+//!              -> ScancodeStream pops byte -> декод -> console::feed_char
 //! ```
 
-use crate::{print, println};
+use crate::println;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use crossbeam_queue::ArrayQueue;
@@ -107,9 +110,11 @@ impl Stream for ScancodeStream {
     }
 }
 
-/// Задача: читает скан-коды из потока, декодирует (раскладка US, scancode set 1) и
-/// печатает символы. Крутится в экзекьюторе и спит, пока ввода нет.
-pub async fn print_keypresses() {
+/// Задача: читает скан-коды из потока, декодирует (раскладка US, scancode set 1) и кормит
+/// символами линейную дисциплину ([`super::console::feed_char`]) — она копит ввод построчно,
+/// отражает его на экран и отдаёт `read(0)`. Крутится в экзекьюторе и спит, пока ввода нет.
+/// Спец-клавиши (`RawKey`: стрелки, F-клавиши) пока игнорируем.
+pub async fn process_input() {
     let mut scancodes = ScancodeStream::new();
     let mut keyboard = PS2Keyboard::new(ScancodeSet1::new(), Us104Key, HandleControl::Ignore);
 
@@ -117,8 +122,8 @@ pub async fn print_keypresses() {
         if let Ok(Some(event)) = keyboard.add_byte(scancode) {
             if let Some(key) = keyboard.process_keyevent(event) {
                 match key {
-                    DecodedKey::Unicode(c) => print!("{c}"),
-                    DecodedKey::RawKey(k) => print!("{k:?}"),
+                    DecodedKey::Unicode(c) => super::console::feed_char(c),
+                    DecodedKey::RawKey(_) => {}
                 }
             }
         }

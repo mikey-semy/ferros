@@ -21,7 +21,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
-use ferros::drivers::{keyboard, pci, virtio_blk};
+use ferros::drivers::{console, keyboard, pci, virtio_blk};
 use ferros::mm::frame::BootInfoFrameAllocator;
 use ferros::sched::executor::Executor;
 use ferros::sched::{thread, Task};
@@ -90,6 +90,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // M4c: очередь скан-кодов клавиатуры (после кучи — она аллоцирует буфер).
     keyboard::init();
+    // M7a: линейная дисциплина консоли (буферы — кучевые, поэтому после кучи).
+    console::init();
 
     // M6a: перечисляем шину PCI и печатаем устройства в serial (нужна куча — список в Vec).
     // Видно хост-мост i440fx и подключённый диск virtio-blk — фундамент для M6b.
@@ -172,7 +174,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // он крутится на «нулевом» потоке, который таймер тоже вытесняет в пользу A/B.
     let mut executor = Executor::new();
     executor.spawn(Task::new(example_task()));
-    executor.spawn(Task::new(keyboard::print_keypresses()));
+    executor.spawn(Task::new(keyboard::process_input()));
     executor.run()
 }
 
