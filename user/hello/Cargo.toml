@@ -77,6 +77,11 @@ path = "src/argvecho.rs"
 name = "execargv"
 path = "src/execargv.rs"
 
+# Проверка cwd (M7c): getcwd/chdir/относительный open/`..`.
+[[bin]]
+name = "cwdtest"
+path = "src/cwdtest.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"

@@ -186,6 +186,9 @@ fn exec(regs: &mut SyscallRegs, path_ptr: u64) {
             return;
         }
     };
+    // Относительный путь exec → абсолютный от cwd текущего (ещё старого) процесса (M7c).
+    let path = crate::syscall::files::resolve_path(path);
+    let path = path.as_str();
 
     // 2) Байты программы — из файловой системы.
     let bytes = match crate::fs::open(path) {

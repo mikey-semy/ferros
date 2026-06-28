@@ -25,6 +25,10 @@ pub const SYS_CLOSE: u64 = 3;
 pub const SYS_LSEEK: u64 = 8;
 /// `getpid()` — идентификатор текущего процесса.
 pub const SYS_GETPID: u64 = 39;
+/// `getcwd(buf, size)` — текущий рабочий каталог в буфер пользователя (M7c).
+pub const SYS_GETCWD: u64 = 79;
+/// `chdir(path)` — сменить текущий рабочий каталог (M7c).
+pub const SYS_CHDIR: u64 = 80;
 /// `fork()` — создать копию процесса (2a3, зарезервировано).
 pub const SYS_FORK: u64 = 57;
 /// `execve(path, argv, envp)` — заменить образ процесса (2a2, зарезервировано).
@@ -100,3 +104,5 @@ pub const EINVAL: i64 = 22;
 pub const EMFILE: i64 = 24;
 /// Системный вызов не реализован.
 pub const ENOSYS: i64 = 38;
+/// Результат не помещается в переданный буфер (например, `getcwd` с малым `size`, M7c).
+pub const ERANGE: i64 = 34;
