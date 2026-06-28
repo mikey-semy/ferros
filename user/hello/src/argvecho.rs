@@ -54,11 +54,11 @@ extern "C" fn argv_main(sp: *const u64) -> ! {
     let argv = unsafe { sp.add(1) as *const *const u8 };
 
     // SAFETY: ядро построило валидный начальный стек; читаем argc и argc указателей argv.
+    // argv[0] — имя вызова (зависит от того, как запущена программа: `ARGVECHO` или `/ARGVECHO`,
+    // а позже из /bin), поэтому его содержимое НЕ проверяем — только число и сами аргументы.
     let code = unsafe {
         if argc != 3 {
             10
-        } else if !cstr_eq(*argv, b"ARGVECHO") {
-            11
         } else if !cstr_eq(*argv.add(1), b"ping") {
             12
         } else if !cstr_eq(*argv.add(2), b"pong") {

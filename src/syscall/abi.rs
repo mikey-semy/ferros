@@ -29,6 +29,8 @@ pub const SYS_GETPID: u64 = 39;
 pub const SYS_GETCWD: u64 = 79;
 /// `chdir(path)` — сменить текущий рабочий каталог (M7c).
 pub const SYS_CHDIR: u64 = 80;
+/// `mkdir(path, mode)` — создать каталог (M7f; `mode` игнорируем).
+pub const SYS_MKDIR: u64 = 83;
 /// `fork()` — создать копию процесса (2a3, зарезервировано).
 pub const SYS_FORK: u64 = 57;
 /// `execve(path, argv, envp)` — заменить образ процесса (2a2, зарезервировано).
@@ -76,6 +78,8 @@ pub const SIG_MAX: u64 = 64;
 pub const ENOENT: i64 = 2;
 /// Нет такого процесса (для `kill`).
 pub const ESRCH: i64 = 3;
+/// Объект уже существует (например, `mkdir` существующего каталога, M7f).
+pub const EEXIST: i64 = 17;
 /// Ошибка ввода-вывода (например, сбой записи на диск).
 pub const EIO: i64 = 5;
 /// Не каталог (ожидался каталог, например для `getdents64`).

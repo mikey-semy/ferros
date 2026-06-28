@@ -137,6 +137,48 @@ unsafe fn atoi(p: *const u8) -> i32 {
     v
 }
 
+/// Содержит ли нуль-терминированная строка `/` (тогда это путь, а не голое имя команды).
+///
+/// # Safety
+/// `p` указывает на читаемую нуль-терминированную строку.
+unsafe fn has_slash(p: *const u8) -> bool {
+    let mut i = 0;
+    loop {
+        match *p.add(i) {
+            0 => return false,
+            b'/' => return true,
+            _ => i += 1,
+        }
+    }
+}
+
+/// Собирает в `buf` путь `"/bin/" + cmd` (нуль-терминированный) и возвращает указатель на него —
+/// простой поиск команды без `/` в каталоге `/bin` (PATH из одного каталога). Усечёт по размеру
+/// буфера, но `/bin/`+имя 8.3 заведомо влезает.
+///
+/// # Safety
+/// `cmd` — читаемая нуль-терминированная строка; `buf` — наш буфер.
+unsafe fn build_bin_path(buf: &mut [u8], cmd: *const u8) -> *const u8 {
+    let prefix = b"/bin/";
+    let mut n = 0;
+    while n < prefix.len() {
+        buf[n] = prefix[n];
+        n += 1;
+    }
+    let mut i = 0;
+    while n < buf.len() - 1 {
+        let c = *cmd.add(i);
+        if c == 0 {
+            break;
+        }
+        buf[n] = c;
+        n += 1;
+        i += 1;
+    }
+    buf[n] = 0;
+    buf.as_ptr()
+}
+
 /// Режет `buf[..n]` на слова на месте: каждый разделитель становится нулём, в `argv` пишутся
 /// указатели на начала нуль-терминированных слов, затем завершающий `NULL`. Возвращает число слов.
 fn tokenize(buf: &mut [u8], n: usize, argv: &mut [*const u8; MAX_ARGS]) -> usize {
@@ -242,13 +284,25 @@ pub extern "C" fn _start() -> ! {
         }
 
         // --- Внешняя программа: fork + execve + wait4 ---
+        // Голое имя (без `/`) ищем в `/bin`; путь (с `/`) исполняем как есть (ядро резолвит его
+        // от cwd). Буфер пути строим ДО fork — ребёнок (копия) унаследует его.
+        let mut pathbuf = [0u8; 256];
+        // SAFETY: argv[0] нуль-терминирован; pathbuf — наш буфер.
+        let cmd = unsafe {
+            if has_slash(argv[0]) {
+                argv[0]
+            } else {
+                build_bin_path(&mut pathbuf, argv[0])
+            }
+        };
+
         // SAFETY: fork.
         let pid = unsafe { sc0(SYS_FORK) };
         if pid == 0 {
             // Ребёнок: заменяем образ на запрошенную программу.
-            // SAFETY: execve с argv[0]/argv нашей памяти; envp пуст (NULL).
+            // SAFETY: execve с cmd/argv нашей памяти; envp пуст (NULL).
             unsafe {
-                sc3(SYS_EXECVE, argv[0] as u64, argv.as_ptr() as u64, 0);
+                sc3(SYS_EXECVE, cmd as u64, argv.as_ptr() as u64, 0);
                 // Сюда — только если execve не удался.
                 write_str(b"ferros: command not found\n");
                 sys_exit(127);

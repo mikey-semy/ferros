@@ -33,6 +33,10 @@ fn main() {
         "src/execargv.rs",
         "src/cwdtest.rs",
         "src/shell.rs",
+        "src/echo.rs",
+        "src/cat.rs",
+        "src/ls.rs",
+        "src/mkdir.rs",
         "Cargo.toml",
         "Cargo.lock",
         "linker.ld",
@@ -69,10 +73,12 @@ fn main() {
     for (bin, _) in binaries {
         let _ = std::fs::remove_file(format!("{out_dir}/{bin}"));
     }
-    // `argvecho` собирается, но в ядро не встраивается (только кладётся на диск) — в списке
-    // `binaries` его нет, поэтому удаляем его ELF отдельно, чтобы изменения linker.ld/target
-    // тоже принудительно перелинковали его.
-    let _ = std::fs::remove_file(format!("{out_dir}/argvecho"));
+    // Бинарники, что собираются, но в ядро НЕ встраиваются (только кладутся на диск) — в списке
+    // `binaries` их нет, поэтому удаляем их ELF отдельно, чтобы изменения linker.ld/target тоже
+    // принудительно перелинковали их. `argvecho` — фикстура M7b; echo/cat/ls/mkdir — coreutils M7f.
+    for bin in ["argvecho", "echo", "cat", "ls", "mkdir"] {
+        let _ = std::fs::remove_file(format!("{out_dir}/{bin}"));
+    }
 
     let mut cmd = Command::new("cargo");
     cmd.current_dir(user_dir).args(["build", "--release"]);
@@ -126,8 +132,8 @@ const FAT_TEST_CONTENT: &[u8] = b"ferros M6c: hello from FAT32!\n";
 
 /// Версия содержимого образа (пишется в BS_VolID при форматировании). Бамп при изменении
 /// набора файлов/содержимого → образ пересоздаётся, хотя размер прежний. v3: ARGVECHO (M7b);
-/// v4: каталог SUB + SUB/INSIDE.TXT (M7c).
-const DISK_VERSION: u32 = 4;
+/// v4: каталог SUB + SUB/INSIDE.TXT (M7c); v5: каталог /BIN с coreutils (M7f).
+const DISK_VERSION: u32 = 5;
 
 /// Создаёт тестовый образ диска (M6c/M6f2): форматирует его как **FAT32** и кладёт тестовый
 /// файл плюс пользовательские ELF-программы (для `execve` по пути — M6f2). Образ —
@@ -212,6 +218,30 @@ fn generate_disk_image(manifest: &str) {
             .write_all(b"inside SUB\n")
             .expect("write SUB/INSIDE.TXT on disk image");
         inside.flush().expect("flush SUB/INSIDE.TXT on disk image");
+
+        // Каталог /BIN с coreutils (M7f): shell ищет голые команды в /bin. Имена 8.3 заглавными
+        // (без LFN), чтобы наш FAT-читатель сопоставлял их без обработки длинных имён.
+        let bin = root
+            .create_dir("BIN")
+            .expect("create BIN dir on disk image");
+        for (file, src) in [
+            ("ECHO", "echo"),
+            ("CAT", "cat"),
+            ("LS", "ls"),
+            ("MKDIR", "mkdir"),
+        ] {
+            let elf_path = PathBuf::from(manifest)
+                .join(format!("user/hello/target/x86_64-user/release/{src}"));
+            let bytes = std::fs::read(&elf_path)
+                .unwrap_or_else(|e| panic!("read {} for disk image: {e}", elf_path.display()));
+            let mut f = bin
+                .create_file(file)
+                .unwrap_or_else(|e| panic!("create BIN/{file} on disk image: {e}"));
+            f.write_all(&bytes)
+                .unwrap_or_else(|e| panic!("write BIN/{file} on disk image: {e}"));
+            f.flush()
+                .unwrap_or_else(|e| panic!("flush BIN/{file} on disk image: {e}"));
+        }
     }
 
     if let Some(parent) = disk.parent() {
