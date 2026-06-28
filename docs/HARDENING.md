@@ -205,18 +205,21 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   if the cluster chain is shorter than `size`, `read_file` returns a silently *truncated*
   buffer rather than an error. Like the ELF loader (D10), this is defensive-but-not-complete;
   a fuller reader would cross-check size vs chain length and surface mismatches.
-- **virtio-blk is polled, single-request, read-only (M6b).** The driver suppresses the
-  device interrupt (`VIRTQ_AVAIL_F_NO_INTERRUPT`) and busy-polls the used ring — no IRQ
-  handler, so a `read_sector` blocks the caller (and, under the global `DEVICE` Mutex,
-  everyone) until the device replies; there's also no poll timeout, so a wedged device hangs
-  the kernel. Only one descriptor chain (desc 0..2) is reused, so there's no queue depth /
-  async I/O. No write/flush path. The read bounces device→DMA page→caller (an extra copy)
-  and serves exactly one 512-byte sector per request — M6c (FAT) will want multi-sector
-  reads and may read straight into the caller's buffer. Interrupt-driven, multi-request,
-  writable I/O is a later pass (needs MSI/INTx handling + a real block layer).
-- **Accept-zero-features negotiation (M6b).** The driver writes Driver Features = 0 (enough
-  for basic legacy read) and doesn't inspect Device Features — it never checks
-  `VIRTIO_BLK_F_RO`, block-size, or geometry. Real negotiation comes with write support.
+- **virtio-blk is polled and single-request (M6b; write added M6g1).** The driver suppresses
+  the device interrupt (`VIRTQ_AVAIL_F_NO_INTERRUPT`) and busy-polls the used ring — no IRQ
+  handler, so a `read_sector`/`write_sector` blocks the caller (and, under the global `DEVICE`
+  Mutex, everyone) until the device replies; there's also no poll timeout, so a wedged device
+  hangs the kernel. Only one descriptor chain (desc 0..2) is reused, so there's no queue depth /
+  async I/O, and both directions bounce through the single DMA page (an extra copy) one 512-byte
+  sector per request. **Write (M6g1)** has no `VIRTIO_BLK_T_FLUSH`/barrier/FUA — a completed
+  `write_sector` means the device accepted it, not that it's durable on real hardware; and there's
+  no multi-sector write. Interrupt-driven, multi-request, cached, flush-aware I/O (a real block
+  layer) is a later pass (needs MSI/INTx handling).
+- **Accept-zero-features negotiation (M6b; still true after M6g1 write).** The driver writes
+  Driver Features = 0 and doesn't inspect Device Features — basic legacy read *and write* work
+  without feature bits, but it never checks `VIRTIO_BLK_F_RO` (so a write to a read-only-exported
+  disk would just fail at the status byte), block-size, or geometry. Real negotiation is still
+  deferred.
 - **`virtio_blk::init` is bound to `BootInfoFrameAllocator` (M6b).** It needs
   `allocate_contiguous` (not on the `FrameAllocator` trait), so it takes the concrete
   allocator. The virtqueue/buffer frames are allocated once and never freed (M3 item). A
