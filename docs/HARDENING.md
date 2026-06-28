@@ -301,6 +301,13 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   it itself exits (then the child is reparented + reaped) — fine for now, but a long-lived
   non-waiting parent accumulates zombies.
 
+- **PID 1 (the shell) exiting is a graceful dead-end, not respawn (M7d).** The shell is launched
+  as PID 1 and can `exit` like any process. The kernel does NOT panic (the always-runnable PID-0
+  zero thread keeps the scheduler alive, so the system just idles on `hlt`), but there is no
+  init-respawn policy: once the only shell exits there is no way back without a reboot. A real
+  `init` should never exit — either loop forever, or re-`fork`/`exec` a fresh shell when its child
+  dies (login-getty style). Deferred until init becomes a separate process from the shell.
+
 - **Signals are terminate-only — no handlers (M6f5).** `kill` + the per-process pending-signal
   set exist, and default-terminate actions are applied, but there is NO user-handler delivery:
   no `sigaction`/`signal` to register a handler, no signal frames pushed on the user stack, no

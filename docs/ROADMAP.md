@@ -84,9 +84,12 @@ a real VFS) remains before **M7** (init process + shell).
     `wait4`). A ring-3 program reads a typed line.
   - **M7b — argv/envp** on the user stack (`execve` + `spawn_user` build the SysV initial stack).
   - **M7c — cwd in the kernel** (`chdir`/`getcwd` + relative path resolution).
-  - **M7d — init (PID 1)** + clean boot (drop the demo spam, reap orphans).
-  - **M7e — shell** (REPL: parse argv, fork→execve→wait4; builtins `cd`/`exit`; `$?`).
-  - **M7f — coreutils** in `/bin` (`ls`/`cat`/`echo`/`mkdir`/`pwd`). Redirection/pipes optional after.
+  - **M7d — init + shell** (done; M7e folded in). Clean boot (dropped the A/B demo + the fixed
+    process list), and a `shell` launched as PID 1: a no-alloc REPL over stdin with builtins
+    `cd`/`pwd`/`exit` and external programs via `fork`/`execve`/`wait4`. Console reads are now
+    one line per `read(0)` (canonical). Boot lands in an interactive `/$ ` prompt.
+  - **M7f — coreutils** in `/bin` (`ls`/`cat`/`echo`/`mkdir`/`pwd`) + the syscalls they need
+    (`mkdir`, …). Redirection/pipes (`dup2`/`pipe`) optional after.
 
 ## Tier D — A "real" OS
 

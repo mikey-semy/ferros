@@ -82,6 +82,11 @@ path = "src/execargv.rs"
 name = "cwdtest"
 path = "src/cwdtest.rs"
 
+# Интерактивный shell (M7d): запускается ядром как PID 1, REPL + builtins + fork/exec/wait.
+[[bin]]
+name = "shell"
+path = "src/shell.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"
