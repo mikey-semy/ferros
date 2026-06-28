@@ -64,6 +64,7 @@ pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
         abi::SYS_LSEEK => files::sys_lseek(args[0], args[1] as i64, args[2]),
         abi::SYS_GETPID => crate::sched::thread::current_pid() as i64,
         abi::SYS_WAIT4 => sys_wait4(args[0] as i64, args[1]),
+        abi::SYS_KILL => sys_kill(args[0] as i64, args[1]),
         abi::SYS_EXIT | abi::SYS_EXIT_GROUP => {
             let status = args[0] as i32;
             LAST_EXIT_CODE.store(status as i64, Ordering::SeqCst);
@@ -84,11 +85,15 @@ pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
 /// закодированный статус в `*status` (если не NULL). `-ECHILD`, если подходящих детей нет.
 fn sys_wait4(pid: i64, status_ptr: u64) -> i64 {
     match crate::sched::thread::wait_current(pid) {
-        Some((child_pid, code)) => {
+        Some((child_pid, code, signal)) => {
             if status_ptr != 0 {
-                // Кодировка статуса как в Linux для завершения по `exit`: код выхода — в
-                // битах 8..15 (младшие 7 бит = 0 → WIFEXITED, WEXITSTATUS = (status >> 8) & 0xff).
-                let encoded = ((code & 0xff) << 8) as u32;
+                // Linux-кодировка статуса. Убит сигналом: младшие 7 бит = номер сигнала
+                // (WIFSIGNALED, WTERMSIG = status & 0x7f). Обычный `exit`: младшие 7 бит = 0,
+                // код выхода — в битах 8..15 (WIFEXITED, WEXITSTATUS = (status >> 8) & 0xff).
+                let encoded = match signal {
+                    Some(sig) => sig as u32,
+                    None => ((code & 0xff) << 8) as u32,
+                };
                 if let Err(errno) = uaccess::copy_to_user(status_ptr, &encoded.to_ne_bytes()) {
                     return -errno;
                 }
@@ -96,6 +101,24 @@ fn sys_wait4(pid: i64, status_ptr: u64) -> i64 {
             child_pid as i64
         }
         None => -abi::ECHILD,
+    }
+}
+
+/// `kill(pid, sig)` (M6f5): посылает сигнал `sig` процессу `pid`. Поддержан `pid > 0`
+/// (конкретный процесс); группы процессов и широковещание (`pid <= 0`) — нет. `sig == 0` —
+/// проверка существования (Linux). Сигналы с действием по умолчанию «завершить» завершают цель
+/// сразу (своих обработчиков пока нет). Возвращает 0 или `-errno`.
+fn sys_kill(pid: i64, sig: u64) -> i64 {
+    if sig > abi::SIG_MAX {
+        return -abi::EINVAL;
+    }
+    if pid <= 0 {
+        // Группы процессов (pid <= 0) не поддержаны — для нас «нет такого процесса».
+        return -abi::ESRCH;
+    }
+    match crate::sched::thread::signal(pid as u32, sig as u8) {
+        crate::sched::thread::SignalOutcome::Delivered => 0,
+        crate::sched::thread::SignalOutcome::NoSuchProcess => -abi::ESRCH,
     }
 }
 
