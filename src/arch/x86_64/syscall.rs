@@ -196,6 +196,23 @@ fn exec(regs: &mut SyscallRegs, path_ptr: u64) {
         }
     };
 
+    // 2b) Копируем argv/envp из памяти СТАРОГО (ещё активного) процесса в кучу ядра — позже
+    //     запишем их на стек нового образа. Старый адрес становится недоступен после смены CR3.
+    let argv = match read_user_str_array(regs.rsi) {
+        Ok(v) => v,
+        Err(errno) => {
+            regs.rax = (-errno) as u64;
+            return;
+        }
+    };
+    let envp = match read_user_str_array(regs.rdx) {
+        Ok(v) => v,
+        Err(errno) => {
+            regs.rax = (-errno) as u64;
+            return;
+        }
+    };
+
     let phys_offset = crate::mm::paging::phys_mem_offset();
     let (old_pml4, cr3_flags) = Cr3::read();
     // Копируем ИМЕННО ядровую таблицу: активна сейчас таблица текущего процесса, её
@@ -209,31 +226,42 @@ fn exec(regs: &mut SyscallRegs, path_ptr: u64) {
         let aspace = unsafe { AddressSpace::new_sharing_kernel(phys_offset, kernel_pml4, fa) };
         // SAFETY: в новом пространстве отображено ядро, поэтому код ядра продолжает работать.
         unsafe { Cr3::write(aspace.pml4_frame(), cr3_flags) };
-        let loaded = {
+        // Грузим ELF, отображаем страницу стека и строим на ней начальный стек (argc/argv/
+        // envp) — всё пока активно пространство нового образа. `Err(errno)` различает битый ELF
+        // (`ENOEXEC`) и не влезший на стек argv (`E2BIG`).
+        let loaded: Result<(u64, u64), i64> = {
             // SAFETY: единственный живой маппер на это пространство в пределах блока.
             let mut m = unsafe { aspace.mapper(phys_offset) };
-            let r = crate::syscall::elf::load(&bytes, &mut m, fa);
-            if r.is_ok() {
-                let stack_page = Page::containing_address(VirtAddr::new(USER_STACK_VA));
-                crate::mm::paging::map_user_page(stack_page, &mut m, fa);
+            match crate::syscall::elf::load(&bytes, &mut m, fa) {
+                Ok(entry) => {
+                    let stack_page = Page::containing_address(VirtAddr::new(USER_STACK_VA));
+                    crate::mm::paging::map_user_page(stack_page, &mut m, fa);
+                    // SAFETY: CR3 = новое пространство, страница стека отображена user+writable.
+                    match unsafe {
+                        build_user_stack(USER_STACK_VA + 4096, USER_STACK_VA, &argv, &envp)
+                    } {
+                        Ok(rsp) => Ok((entry, rsp)),
+                        Err(()) => Err(abi::E2BIG),
+                    }
+                }
+                Err(_) => Err(abi::ENOEXEC),
             }
-            r
         };
         // SAFETY: возвращаем активным старое пространство (на случай ошибки — оно цело).
         unsafe { Cr3::write(old_pml4, cr3_flags) };
         match loaded {
-            Ok(entry) => Ok((aspace.pml4_frame(), entry)),
-            Err(_) => {
+            Ok((entry, rsp)) => Ok((aspace.pml4_frame(), entry, rsp)),
+            Err(errno) => {
                 // SAFETY: свежесобранное (сейчас неактивное) пространство бросаем — освобождаем.
                 unsafe { aspace.destroy(phys_offset, fa) };
-                Err(())
+                Err(errno)
             }
         }
     });
-    let (new_pml4, entry) = match built {
+    let (new_pml4, entry, user_rsp) = match built {
         Some(Ok(x)) => x,
-        Some(Err(())) => {
-            regs.rax = (-abi::ENOEXEC) as u64;
+        Some(Err(errno)) => {
+            regs.rax = (-errno) as u64;
             return;
         }
         None => {
@@ -258,8 +286,10 @@ fn exec(regs: &mut SyscallRegs, path_ptr: u64) {
     );
 
     // 5) Переписываем сохранённое состояние пользователя: чистый старт новой программы.
+    //    `user_rsp` указывает на `argc` построенного начального стека (System V ABI); регистры
+    //    зануляем — аргументы программа берёт со стека, не из них.
     regs.rip = entry;
-    regs.user_rsp = USER_STACK_VA + 4096;
+    regs.user_rsp = user_rsp;
     regs.rflags = 0x202; // IF=1 + зарезервированный бит
     regs.rax = 0;
     regs.rdi = 0;
@@ -435,6 +465,11 @@ pub fn init() {
 /// чтобы вся пользовательская память была в одном свободном у ядра слоте.
 pub const USER_STACK_VA: u64 = 0x7F80_1000_0000;
 
+// Гарантия на этапе компиляции: [`build_user_stack`] выравнивает стек вниз `sp &= !0xF` БЕЗ
+// повторной проверки нижней границы — это безопасно ровно потому, что сам пол страницы стека
+// (`USER_STACK_VA`) выровнен по 16: выравнивание может дойти до пола, но не уйти под него.
+const _: () = assert!(USER_STACK_VA.is_multiple_of(16));
+
 /// Размер ядрового стека пользовательского процесса (20 КиБ): на нём строится начальный
 /// контекст (трамплин входа), на него (rsp0) садятся прерывания из кольца 3, и с M6f4 на нём же
 /// исполняется `syscall` этого процесса (раньше — общий стек; 5 страниц как у того общего).
@@ -475,14 +510,21 @@ pub unsafe fn spawn_user(
     // SAFETY: в пространстве процесса отображено ядро, поэтому код ядра продолжает работать.
     unsafe { Cr3::write(aspace.pml4_frame(), cr3_flags) };
 
-    let entry = {
+    let (entry, user_stack_top) = {
         // SAFETY: единственный живой маппер на это пространство в пределах блока.
         let mut pmapper = unsafe { aspace.mapper(phys_offset) };
         let entry = crate::syscall::elf::load(elf_bytes, &mut pmapper, frame_allocator)
             .expect("failed to load user ELF");
         let stack_page = Page::containing_address(VirtAddr::new(USER_STACK_VA));
         crate::mm::paging::map_user_page(stack_page, &mut pmapper, frame_allocator);
-        entry
+        // Начальный процесс не получает аргументов: строим пустой System V-стек (argc = 0),
+        // чтобы раскладка стека была валидной и единообразной с `execve`. CR3 = это пространство.
+        // SAFETY: страница стека только что отображена user+writable в активной таблице.
+        let user_stack_top = unsafe {
+            build_user_stack(USER_STACK_VA + 4096, USER_STACK_VA, &[], &[])
+                .expect("initial user stack does not fit")
+        };
+        (entry, user_stack_top)
     };
 
     // Возвращаем активным пространство ядра.
@@ -491,8 +533,6 @@ pub unsafe fn spawn_user(
     if was_enabled {
         interrupts::enable();
     }
-
-    let user_stack_top = USER_STACK_VA + 4096;
 
     // Ядровый стек процесса (куча — уже в пространстве ядра). Вершина выровнена вниз по 16.
     let mut kstack = alloc::vec![0u8; USER_KERNEL_STACK_SIZE].into_boxed_slice();
@@ -512,4 +552,115 @@ pub unsafe fn spawn_user(
     };
 
     crate::sched::thread::add_user_task(rsp, aspace.pml4_frame(), ktop as u64, kstack);
+}
+
+/// Верхняя граница числа элементов `argv`/`envp`, читаемых из памяти пользователя (M7b) —
+/// чтобы битый/злонамеренный массив без `NULL` не зациклил чтение.
+const MAX_STR_ARRAY: usize = 128;
+
+/// Читает из ТЕКУЩЕГО (старого) адресного пространства `NULL`-терминированный массив
+/// пользовательских указателей на C-строки (`argv`/`envp` для `execve`, M7b) во владелые копии
+/// ядра. Останавливается на нулевом указателе или [`MAX_STR_ARRAY`]. `array_ptr == 0` (нет
+/// массива) → пустой результат. Возвращает положительный `errno` при плохом указателе/строке
+/// (вызывающий вернёт `-errno`), `E2BIG` — если элементов слишком много.
+fn read_user_str_array(array_ptr: u64) -> Result<alloc::vec::Vec<alloc::vec::Vec<u8>>, i64> {
+    use crate::syscall::uaccess;
+    let mut out = alloc::vec::Vec::new();
+    if array_ptr == 0 {
+        return Ok(out);
+    }
+    for i in 0..MAX_STR_ARRAY {
+        // Указатель-элемент — это 8 байт в памяти пользователя (uaccess сам проверит диапазон).
+        let slot = array_ptr + (i as u64) * 8;
+        let ptr = uaccess::with_user_bytes(slot, 8, |b| {
+            u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+        })?;
+        if ptr == 0 {
+            return Ok(out); // конец массива
+        }
+        out.push(uaccess::read_user_cstr(ptr)?);
+    }
+    Err(crate::syscall::abi::E2BIG)
+}
+
+/// Строит начальный стек процесса по System V AMD64 ABI на вершине его страницы стека (M7b).
+/// Вызывать, когда АКТИВНО адресное пространство процесса (CR3 на него) и страница стека
+/// `[floor, top)` уже отображена present+user+writable: пишем прямо по пользовательским VA
+/// (кольцо 0 может).
+///
+/// Раскладка на входе в `_start` (от младших адресов к старшим), `rsp` указывает на `argc`:
+/// `[argc][argv0…][NULL][envp0…][NULL][auxv: AT_NULL=0,0]`; строки лежат выше, и всё выровнено
+/// так, что `rsp % 16 == 0` (требование ABI к точке входа процесса). `argv`/`envp` — владелые
+/// копии строк ядра (без терминирующего нуля — дописываем его). Возвращает `rsp` либо `Err(())`,
+/// если содержимое не помещается в страницу (вызывающий трактует как `E2BIG`).
+///
+/// # Safety
+/// CR3 = адресное пространство процесса; страница `[floor, top)` отображена user+writable.
+unsafe fn build_user_stack(
+    top: u64,
+    floor: u64,
+    argv: &[alloc::vec::Vec<u8>],
+    envp: &[alloc::vec::Vec<u8>],
+) -> Result<u64, ()> {
+    let mut sp = top;
+
+    // Пишет строку (с дописанным нулём) вниз от вершины, возвращает её VA. Инвариант: sp ≥ floor.
+    let put_str = |sp: &mut u64, s: &[u8]| -> Result<u64, ()> {
+        let need = s.len() as u64 + 1; // +1 под завершающий нуль
+        if *sp - floor < need {
+            return Err(());
+        }
+        *sp -= need;
+        // SAFETY: [*sp, *sp+need) внутри отображённой страницы стека; пишем байты строки и нуль.
+        unsafe {
+            core::ptr::copy_nonoverlapping(s.as_ptr(), *sp as *mut u8, s.len());
+            (*sp as *mut u8).add(s.len()).write(0);
+        }
+        Ok(*sp)
+    };
+    // Кладёт 8-байтное слово вниз. Инвариант: sp ≥ floor.
+    let push = |sp: &mut u64, v: u64| -> Result<(), ()> {
+        if *sp - floor < 8 {
+            return Err(());
+        }
+        *sp -= 8;
+        // SAFETY: *sp внутри отображённой страницы, выровнен по 8 (sp двигаем кратно 8/выровняв).
+        unsafe { (*sp as *mut u64).write(v) };
+        Ok(())
+    };
+
+    // 1) Строки argv, затем envp — наверх страницы, запоминаем их пользовательские адреса.
+    let mut arg_ptrs = alloc::vec::Vec::with_capacity(argv.len());
+    for s in argv {
+        arg_ptrs.push(put_str(&mut sp, s)?);
+    }
+    let mut env_ptrs = alloc::vec::Vec::with_capacity(envp.len());
+    for s in envp {
+        env_ptrs.push(put_str(&mut sp, s)?);
+    }
+
+    // 2) Граница под массивы указателей — выровнять вниз по 16.
+    sp &= !0xF;
+
+    // 3) Падинг, чтобы итоговый argc лёг на 16: каждый слот 8 байт, нужно ЧЁТНОЕ число слотов.
+    //    Слоты (младший→старший): argc(1) + argv(n) + NULL(1) + envp(m) + NULL(1) + auxv AT_NULL(2).
+    let slots = 1 + arg_ptrs.len() + 1 + env_ptrs.len() + 1 + 2;
+    if slots % 2 == 1 {
+        push(&mut sp, 0)?; // лишний слот выше auxv (программа его не читает)
+    }
+
+    // 4) Пишем массивы ВНИЗ (последний push ложится по младшему адресу = argc). auxv → envp → argv.
+    push(&mut sp, 0)?; // auxv: a_val (AT_NULL)
+    push(&mut sp, 0)?; // auxv: a_type = AT_NULL (конец auxv)
+    push(&mut sp, 0)?; // конец envp
+    for &p in env_ptrs.iter().rev() {
+        push(&mut sp, p)?;
+    }
+    push(&mut sp, 0)?; // конец argv
+    for &p in arg_ptrs.iter().rev() {
+        push(&mut sp, p)?;
+    }
+    push(&mut sp, arg_ptrs.len() as u64)?; // argc
+
+    Ok(sp) // указывает на argc, выровнен по 16
 }

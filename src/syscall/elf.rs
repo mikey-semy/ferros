@@ -58,6 +58,10 @@ pub static LSTEST_ELF: &[u8] = include_bytes!(env!("USER_LSTEST_ELF"));
 /// Встроенная проверка stdin (M7a): читает строку через `read(0)` и печатает её обратно.
 pub static STDINTEST_ELF: &[u8] = include_bytes!(env!("USER_STDINTEST_ELF"));
 
+/// Встроенный запускатель (M7b): `execve("ARGVECHO", ["ARGVECHO","ping","pong"])` — проверяет
+/// передачу argv через execve. Целевой `ARGVECHO` лежит на диске.
+pub static EXECARGV_ELF: &[u8] = include_bytes!(env!("USER_EXECARGV_ELF"));
+
 /// Почему ELF не удалось загрузить.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfError {
