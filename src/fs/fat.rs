@@ -23,6 +23,8 @@
 //! FAT). Подкаталоги, удаление, расширение каталога и кэш — позже (см. `docs/HARDENING.md`).
 
 use crate::drivers::virtio_blk::{self, BlkError, SECTOR_SIZE};
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 /// Записей FAT32 в одном секторе (по 4 байта).
@@ -102,6 +104,30 @@ struct DirEntry {
     first_cluster: u32,
     size: u32,
     is_dir: bool,
+}
+
+/// Одна запись при листинге каталога (M6g5): человекочитаемое имя и признак каталога.
+pub struct DirItem {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+/// Результат [`Fat32::lookup`]: путь — либо файл (его содержимое), либо каталог (его листинг).
+pub enum Node {
+    File(Vec<u8>),
+    Dir(Vec<DirItem>),
+}
+
+/// Восстанавливает человекочитаемое имя из 11-байтной формы 8.3 (`b"HELLO   TXT"` → `"HELLO.TXT"`,
+/// `b".          "` → `"."`). Пробелы-заполнители убираем; расширение — после точки, если есть.
+fn name_83_to_string(entry: &[u8; 11]) -> String {
+    let base = core::str::from_utf8(&entry[..8]).unwrap_or("").trim_end();
+    let ext = core::str::from_utf8(&entry[8..]).unwrap_or("").trim_end();
+    if ext.is_empty() {
+        base.into()
+    } else {
+        format!("{base}.{ext}")
+    }
 }
 
 fn read_u16(buf: &[u8], off: usize) -> u16 {
@@ -262,8 +288,7 @@ impl Fat32 {
     }
 
     /// Читает файл по пути `path` (компоненты 8.3, например `"DIR/HELLO.TXT"`) и возвращает его
-    /// содержимое. Спускается по подкаталогам, затем идёт по цепочке кластеров, набирая ровно
-    /// `size` байт. `-IsADirectory`, если путь указывает на каталог.
+    /// содержимое. `-IsADirectory`, если путь указывает на каталог.
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>, FatError> {
         let (dir_cluster, name) = self.resolve_parent(path)?;
         let entry = self
@@ -272,7 +297,12 @@ impl Fat32 {
         if entry.is_dir {
             return Err(FatError::IsADirectory);
         }
+        self.read_entry(&entry)
+    }
 
+    /// Читает содержимое файла по его записи каталога: идёт по цепочке кластеров, набирая ровно
+    /// `entry.size` байт.
+    fn read_entry(&self, entry: &DirEntry) -> Result<Vec<u8>, FatError> {
         let mut data = Vec::with_capacity(entry.size as usize);
         let mut remaining = entry.size as usize;
         let mut cluster = entry.first_cluster;
@@ -291,6 +321,58 @@ impl Fat32 {
             cluster = self.next_cluster(cluster)?;
         }
         Ok(data)
+    }
+
+    /// Открывает путь: возвращает либо содержимое файла, либо листинг каталога (M6g5). Пустой
+    /// путь / `"/"` — корневой каталог. `-NotFound`, если записи нет.
+    pub fn lookup(&self, path: &str) -> Result<Node, FatError> {
+        let trimmed = path.trim_matches('/');
+        if trimmed.is_empty() {
+            return Ok(Node::Dir(self.list_dir(self.root_cluster)?)); // корень
+        }
+        let (dir_cluster, name) = self.resolve_parent(path)?;
+        let entry = self
+            .find_in_dir(dir_cluster, name)?
+            .ok_or(FatError::NotFound)?;
+        if entry.is_dir {
+            Ok(Node::Dir(self.list_dir(entry.first_cluster)?))
+        } else {
+            Ok(Node::File(self.read_entry(&entry)?))
+        }
+    }
+
+    /// Собирает записи каталога, начинающегося с `dir_cluster`: имя (из формы 8.3) и признак
+    /// каталога для каждой «настоящей» записи (пропуская LFN, метку тома, удалённые и конец).
+    fn list_dir(&self, dir_cluster: u32) -> Result<Vec<DirItem>, FatError> {
+        let mut items = Vec::new();
+        let mut cluster = dir_cluster;
+        let mut steps_left = self.cluster_count;
+        while self.valid_cluster(cluster) && steps_left > 0 {
+            steps_left -= 1;
+            let first = self.first_sector_of_cluster(cluster);
+            for s in 0..self.sectors_per_cluster {
+                let mut buf = [0u8; SECTOR_SIZE];
+                virtio_blk::read_sector((first + s) as u64, &mut buf)?;
+                for entry in buf.chunks_exact(DIR_ENTRY_SIZE) {
+                    match entry[0] {
+                        0x00 => return Ok(items), // конец каталога
+                        0xE5 => continue,         // удалённая
+                        _ => {}
+                    }
+                    let attr = entry[11];
+                    if attr & ATTR_LONG_NAME == ATTR_LONG_NAME || attr & ATTR_VOLUME_ID != 0 {
+                        continue; // LFN-часть или метка тома
+                    }
+                    let name11: &[u8; 11] = entry[..11].try_into().unwrap();
+                    items.push(DirItem {
+                        name: name_83_to_string(name11),
+                        is_dir: attr & ATTR_DIRECTORY != 0,
+                    });
+                }
+            }
+            cluster = self.next_cluster(cluster)?;
+        }
+        Ok(items)
     }
 
     /// Пишет запись FAT для `cluster` = `value` (значащие 28 бит), сохраняя 4 старших

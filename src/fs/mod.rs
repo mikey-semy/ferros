@@ -22,6 +22,14 @@ pub fn open(path: &str) -> Result<Vec<u8>, fat::FatError> {
     volume.read_file(path)
 }
 
+/// Открывает путь, не зная заранее файл это или каталог (M6g5): возвращает [`fat::Node`] —
+/// содержимое файла или листинг каталога. Используется сисколлом `open` (он различает файл/
+/// каталог по результату). Пустой путь / `"/"` — корневой каталог.
+pub fn lookup(path: &str) -> Result<fat::Node, fat::FatError> {
+    let volume = fat::Fat32::mount()?;
+    volume.lookup(path)
+}
+
 /// Создаёт или перезаписывает файл по пути его содержимым `data` (M6g2). Путь — `/a/b/file`
 /// (компоненты 8.3); родительские каталоги должны существовать (M6g4).
 pub fn write_file(path: &str, data: &[u8]) -> Result<(), fat::FatError> {

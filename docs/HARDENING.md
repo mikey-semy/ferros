@@ -204,6 +204,12 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   its existing slots fill up, creating another entry returns `DirFull` (no dir-cluster extension).
   A new `mkdir` directory is one cluster (`.`/`..` + room for entries until it fills). There is no
   `rmdir`/`unlink` (no removal of files or dirs), and `mkdir` requires the parent to already exist.
+- **`getdents64` snapshots the listing at `open` (M6g5).** Opening a directory serializes its
+  whole entry list into the fd's buffer once; a file created/removed afterward by another process
+  won't appear/disappear in an already-open dir fd. `d_ino` is a pseudo value (entry index, not a
+  real inode), `d_off` is a byte cursor (no `lseek`-on-a-dir support), and listings include the
+  `.`/`..` entries for subdirectories (the FAT32 root has none). LFN entries are skipped, so
+  long-named files are invisible to `ls`.
 - **FAT write is whole-file, not crash-safe, no dir growth / delete (M6g2).** `write_file`
   replaces a file's entire contents (no append/random-write/truncate-to-size); there's no
   `unlink`/delete and no directory **extension** — if the root dir's existing clusters have no
