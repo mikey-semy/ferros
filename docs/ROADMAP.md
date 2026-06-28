@@ -6,9 +6,9 @@ merged PR. We detail a milestone only when we reach it. Current status: **M6 don
 `uaccess`; VFS + `open`/`read`/`close`/`lseek` — a user process reads a file from disk;
 M0–M5 merged). **Now in the pre-M7 "maturity" consolidation:** memory reclamation
 (M6e — freeing frame allocator, address-space teardown, process reaping) is **done**,
-and the process model (M6f) is underway — PIDs/`getpid`, `execve`, `fork`, and `wait4`
-are **done**; basic signals (M6f5) and then filesystem breadth remain before **M7**
-(init process + shell).
+and the process model (M6f) is **done** — PIDs/`getpid`, `execve`, `fork`, `wait4`, and
+basic signals give a full Unix-process core. Filesystem breadth (write + subdirectories +
+a real VFS) remains before **M7** (init process + shell).
 
 > **North star (D8):** run the existing **Linux** software ecosystem rather than write a
 > native app ecosystem from scratch. Long-term aim is **ABI-level** compatibility
@@ -63,11 +63,12 @@ are **done**; basic signals (M6f5) and then filesystem breadth remain before **M
   - **M6e — Memory reclamation.** The kernel must stop leaking on process exit. Stages:
     **M6e1 — freeing frame allocator** (done; free-list + `deallocate_frame`), **M6e2 —
     address-space teardown**, **M6e3 — process reaping**.
-  - **M6f — Process model** (in progress). PIDs + fork/exec/wait + basic signals. Stages:
-    **M6f1 — process table (PIDs + `getpid`)** (done), **M6f2 — `execve`** (done; loads from the
-    FAT disk), **M6f3 — `fork`** (done; copies the address space + fd table + full register
-    context), **M6f4 — `wait4`** (done; zombies + block/wake, on a per-process syscall stack),
-    M6f5 signals.
+  - **M6f — Process model** (done). PIDs + fork/exec/wait + basic signals. Stages:
+    **M6f1 — process table (PIDs + `getpid`)**, **M6f2 — `execve`** (loads from the FAT disk),
+    **M6f3 — `fork`** (copies the address space + fd table + full register context),
+    **M6f4 — `wait4`** (zombies + block/wake, on a per-process syscall stack), **M6f5 — basic
+    signals** (`kill` + default-terminate actions; ring-3 faults become `SIGSEGV`; `wait`
+    reports `WIFSIGNALED`).
   - Then **filesystem** breadth (write + subdirectories + a real VFS).
 - **M7 — Shell.** init process, interactive shell, basic utilities, line editing.
 

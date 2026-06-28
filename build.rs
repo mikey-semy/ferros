@@ -25,6 +25,7 @@ fn main() {
         "src/exectest.rs",
         "src/forktest.rs",
         "src/waittest.rs",
+        "src/killtest.rs",
         "Cargo.toml",
         "Cargo.lock",
         "linker.ld",
@@ -44,6 +45,7 @@ fn main() {
         ("exectest", "USER_EXECTEST_ELF"),
         ("forktest", "USER_FORKTEST_ELF"),
         ("waittest", "USER_WAITTEST_ELF"),
+        ("killtest", "USER_KILLTEST_ELF"),
     ];
 
     // Удаляем прошлые ELF перед сборкой: cargo не отслеживает linker.ld / target.json как

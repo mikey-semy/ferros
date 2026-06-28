@@ -131,11 +131,12 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   with IF=0 (non-preemptible, non-reentrant), but a blocking/yielding syscall or SMP needs a
   per-task syscall stack (the per-task kernel stack / rsp0 already exists for ring-3
   interrupts).
-- **User-fault termination is coarse, and only covers ring-3 *code* faults (M5c3b).** A
-  #PF/#GP taken while executing in ring 3 now kills *the process* (not the kernel) via
-  `exit_current`, but there's no signal delivery (`SIGSEGV`), faulting-instruction reporting,
-  or core dump — just terminate + a serial line. A real fault model (signals, `wait`-able
-  status) comes with a process model. (The separate hole — a *kernel* fault on a user pointer
+- **User-fault termination is coarse, and only covers ring-3 *code* faults (M5c3b → improved
+  M6f5).** A #PF/#GP taken while executing in ring 3 kills *the process* (not the kernel); since
+  M6f5 it terminates via `exit_current_killed(SIGSEGV)`, so the status is a `wait`-able
+  `WIFSIGNALED(SIGSEGV)` rather than a hardcoded code 139. Still missing: signal *handlers* (a
+  process can't catch `SIGSEGV`), faulting-instruction/address reporting to the process, and core
+  dumps — just terminate + a serial line. (The separate hole — a *kernel* fault on a user pointer
   inside a syscall, e.g. `write(1, unmapped_ptr, n)` — is **fixed in M6d1**: `uaccess`
   pre-validates the mapping and returns `-EFAULT`; see the uaccess item above.)
 - **Scheduler now carries an arch `PhysFrame` (CR3).** `sched::thread::Thread` holds
@@ -263,6 +264,22 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   with M7. Also: a process that `fork`s but never `wait`s leaks its child as a zombie only until
   it itself exits (then the child is reparented + reaped) — fine for now, but a long-lived
   non-waiting parent accumulates zombies.
+
+- **Signals are terminate-only — no handlers (M6f5).** `kill` + the per-process pending-signal
+  set exist, and default-terminate actions are applied, but there is NO user-handler delivery:
+  no `sigaction`/`signal` to register a handler, no signal frames pushed on the user stack, no
+  `sigreturn`, no signal masking (`sigprocmask`), no real-time/queued signals. The
+  `pending_signals` bitmask is recorded but only consulted for the immediate default action;
+  pending non-terminating signals just sit there. Full handler delivery is the next signals
+  stretch.
+- **`kill` applies the default action synchronously from the killer's context (M6f5).** Because
+  there are no handlers, terminating a target is just editing its scheduler entry (it isn't on a
+  CPU — single core), so `kill` does it inline rather than making the victim run signal-handling
+  code at its next return-to-userspace. Once handlers exist, delivery must move to the victim's
+  return-to-ring-3 path (and a blocked `wait` must become interruptible by a signal — today a
+  process blocked in `wait` is woken only by a child exit, not by a signal). No process groups
+  (`kill(pid <= 0)` is `-ESRCH`), and `SIGSTOP`/job-control stop actions are unimplemented
+  (treated as no-op rather than stopping the process).
 
 ## Cross-cutting (whole kernel)
 

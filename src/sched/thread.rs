@@ -72,6 +72,13 @@ struct Thread {
     parent: u32,
     /// Код завершения (`exit`); `None`, пока поток жив. Собирается родителем через `wait` (M6f4).
     exit_status: Option<i32>,
+    /// Каким сигналом завершён (M6f5): `Some(sig)` — убит сигналом (`wait` сообщит `WIFSIGNALED`),
+    /// `None` — обычный выход через `exit`. Пишется при завершении вместе с `exit_status`.
+    term_signal: Option<u8>,
+    /// Набор ожидающих сигналов (битовая маска, бит `sig-1`). `kill` ставит бит; сигналы с
+    /// действием по умолчанию «завершить» применяются сразу, остальные пока лишь записываются
+    /// (доставка обработчиков — позже, см. HARDENING).
+    pending_signals: u64,
     /// Сохранённый `rsp` потока (в его ядровом стеке). Обновляется при переключении прочь.
     rsp: u64,
     /// Память стека (ядрового). `None` у «нулевого» потока — он на стеке ядра от загрузчика.
@@ -109,6 +116,8 @@ pub fn init() {
                 pid: 0, // «нулевой» поток ядра — PID 0
                 parent: 0,
                 exit_status: None,
+                term_signal: None,
+                pending_signals: 0,
                 rsp: 0,
                 stack: None,
                 cr3: None,
@@ -142,6 +151,8 @@ pub fn spawn(entry: extern "C" fn() -> !) {
         pid: NEXT_PID.fetch_add(1, Ordering::SeqCst),
         parent,
         exit_status: None,
+        term_signal: None,
+        pending_signals: 0,
         rsp,
         stack: Some(stack),
         cr3: None,
@@ -163,6 +174,8 @@ pub fn add_user_task(rsp: u64, cr3: PhysFrame, kernel_stack_top: u64, kstack: Bo
         pid,
         parent,
         exit_status: None,
+        term_signal: None,
+        pending_signals: 0,
         rsp,
         stack: Some(kstack),
         cr3: Some(cr3),
@@ -244,38 +257,119 @@ pub fn stop_preemption() {
 /// Если нет ни одного другого готового потока (так быть не должно — «нулевой» поток ядра
 /// всегда `Runnable`).
 pub fn exit_current(status: i32) -> ! {
+    exit_current_inner(status, None)
+}
+
+/// Завершает **текущий** процесс как убитый сигналом `sig` (M6f5): код выхода по конвенции
+/// `128+sig`, а `wait` сообщит родителю `WIFSIGNALED`. Зовётся из обработчика сбоя кольца 3
+/// (`SIGSEGV`) — заменил прежний «тихий» `exit_current(139)`.
+pub fn exit_current_killed(sig: u8) -> ! {
+    exit_current_inner(128 + sig as i32, Some(sig))
+}
+
+/// Общая часть завершения текущего потока: фиксирует исход (`terminate`) и уходит на другой
+/// готовый поток. Не возвращается. Сам поток не освобождает свой стек/АП (он на них) — это
+/// позже делает [`reap`].
+fn exit_current_inner(status: i32, signal: Option<u8>) -> ! {
     // Гарантируем IF=0 на всё завершение (switch_to_next переключает без сохранения IF).
     interrupts::disable();
     {
         let mut guard = SCHEDULER.lock();
         let sched = guard.as_mut().expect("scheduler not initialized");
         let cur = sched.current;
-        let my_pid = sched.threads[cur].pid;
-        sched.threads[cur].exit_status = Some(status);
-        // Зомби, а не сразу Dead: статус ждёт сбора родителем через `wait` (M6f4).
-        sched.threads[cur].state = State::Zombie;
-        // Переусыновляем своих детей ядру (PID 0): осиротевших зомби соберёт reaper, а живые
-        // дети, выйдя, станут зомби с parent 0 и тоже будут собраны (без `wait` от мёртвого
-        // родителя они бы зависли навсегда).
-        for t in sched.threads.iter_mut() {
-            if t.parent == my_pid {
-                t.parent = 0;
-            }
-        }
-        // Будим родителя, если он заблокирован в `wait` — пусть соберёт наш статус.
-        let parent_pid = sched.threads[cur].parent;
-        if parent_pid != 0 {
-            for t in sched.threads.iter_mut() {
-                if t.pid == parent_pid && t.state == State::Blocked {
-                    t.state = State::Runnable;
-                    break;
-                }
-            }
-        }
+        terminate(sched, cur, status, signal);
     } // замок отпускаем здесь — switch_to_next возьмёт его снова
     switch_to_next();
     // switch_to_next ушёл в другой готовый поток; в мёртвый поток уже не вернутся.
     unreachable!("exit_current returned to a dead task");
+}
+
+/// Помечает поток `idx` завершённым (зомби) с исходом (`status` + `signal`), переусыновляет его
+/// детей ядру и будит его родителя, если тот ждёт в `wait`. Общая логика обычного `exit`
+/// (M6f4) и убийства сигналом (M6f5). Только меняет состояние планировщика — НЕ переключает
+/// контекст (это делает вызывающий, если завершает себя). Вызывать под замком `SCHEDULER`.
+fn terminate(sched: &mut Scheduler, idx: usize, status: i32, signal: Option<u8>) {
+    let pid = sched.threads[idx].pid;
+    sched.threads[idx].exit_status = Some(status);
+    sched.threads[idx].term_signal = signal;
+    // Зомби, а не сразу Dead: статус ждёт сбора родителем через `wait` (M6f4).
+    sched.threads[idx].state = State::Zombie;
+    // Переусыновляем детей этого процесса ядру (PID 0): осиротевших зомби соберёт reaper, а
+    // живые дети, выйдя, станут зомби с parent 0 и тоже будут собраны (без `wait` от мёртвого
+    // родителя они бы зависли навсегда).
+    for t in sched.threads.iter_mut() {
+        if t.parent == pid {
+            t.parent = 0;
+        }
+    }
+    // Будим родителя, если он заблокирован в `wait` — пусть соберёт статус.
+    let parent_pid = sched.threads[idx].parent;
+    if parent_pid != 0 {
+        for t in sched.threads.iter_mut() {
+            if t.pid == parent_pid && t.state == State::Blocked {
+                t.state = State::Runnable;
+                break;
+            }
+        }
+    }
+}
+
+/// Действие по умолчанию для сигнала `sig` — завершает ли оно процесс (M6f5). Без
+/// пользовательских обработчиков это и есть вся реакция. Берём Linux-таблицу: большинство
+/// сигналов завершают; игнорируются по умолчанию `SIGCHLD`(17)/`SIGURG`(23)/`SIGWINCH`(28)/
+/// `SIGCONT`(18); останавливающие `SIGSTOP`(19)/`SIGTSTP`(20)/`SIGTTIN`(21)/`SIGTTOU`(22) мы
+/// тоже не реализуем — трактуем как «не завершать» (стоп пока не поддержан).
+fn default_terminates(sig: u8) -> bool {
+    !matches!(sig, 17 | 18 | 19 | 20 | 21 | 22 | 23 | 28)
+}
+
+/// Результат [`signal`].
+pub enum SignalOutcome {
+    /// Сигнал доставлен (или записан в ожидающие) целевому процессу.
+    Delivered,
+    /// Нет такого процесса (жив и с таким PID) — `kill` вернёт `-ESRCH`.
+    NoSuchProcess,
+}
+
+/// Посылает сигнал `sig` процессу `target_pid` (M6f5). Записывает бит в набор ожидающих; если
+/// действие сигнала по умолчанию — завершить, завершает цель немедленно (своих обработчиков у
+/// нас пока нет). `sig == 0` — только проверка существования. Если цель — ТЕКУЩИЙ процесс и
+/// сигнал фатальный, функция НЕ возвращается (уступает CPU, как `exit`).
+pub fn signal(target_pid: u32, sig: u8) -> SignalOutcome {
+    // Под замком меняем состояние; возвращаем, надо ли завершить СЕБЯ (тогда переключимся ниже,
+    // уже без замка — switch_to_next берёт его сам).
+    let self_terminate = interrupts::without_interrupts(|| {
+        let mut guard = SCHEDULER.lock();
+        let sched = guard.as_mut().expect("scheduler not initialized");
+        let cur = sched.current;
+        let Some(idx) = sched
+            .threads
+            .iter()
+            .position(|t| t.pid == target_pid && is_alive(t.state))
+        else {
+            return Err(SignalOutcome::NoSuchProcess);
+        };
+        if sig == 0 {
+            return Ok(false); // только проверка существования
+        }
+        sched.threads[idx].pending_signals |= 1u64 << (sig - 1);
+        if default_terminates(sig) {
+            terminate(sched, idx, 128 + sig as i32, Some(sig));
+            Ok(idx == cur) // себя — надо переключиться прочь
+        } else {
+            Ok(false) // записали в ожидающие, действия по умолчанию нет
+        }
+    });
+    match self_terminate {
+        Ok(true) => {
+            // Мы только что пометили СЕБЯ зомби — уступаем CPU и не возвращаемся.
+            interrupts::disable();
+            switch_to_next();
+            unreachable!("signal terminated self but returned");
+        }
+        Ok(false) => SignalOutcome::Delivered,
+        Err(outcome) => outcome,
+    }
 }
 
 /// Состояния потока — «живой подходящий ребёнок» для `wait`: ещё исполняется или ждёт.
@@ -285,8 +379,9 @@ fn is_alive(state: State) -> bool {
 
 /// Результат одной попытки [`wait_current`] (под замком планировщика).
 enum WaitResult {
-    /// Найден завершившийся ребёнок: его PID и код выхода (он помечен `Dead` — reaper освободит).
-    Collected(u32, i32),
+    /// Найден завершившийся ребёнок: PID, код выхода и сигнал-убийца (`Some` → завершён сигналом).
+    /// Ребёнок помечен `Dead` — reaper освободит.
+    Collected(u32, i32, Option<u8>),
     /// Подходящих завершившихся нет, но есть живые — текущий помечен `Blocked`, надо уступить CPU.
     WouldBlock,
     /// Подходящих детей нет вовсе — `wait` вернёт `-ECHILD`.
@@ -318,8 +413,9 @@ fn try_collect_or_block(want_pid: i64) -> WaitResult {
         if let Some(i) = zombie {
             let child_pid = sched.threads[i].pid;
             let status = sched.threads[i].exit_status.unwrap_or(0);
+            let signal = sched.threads[i].term_signal;
             sched.threads[i].state = State::Dead; // статус собран → reaper освободит
-            return WaitResult::Collected(child_pid, status);
+            return WaitResult::Collected(child_pid, status, signal);
         }
 
         // 2) Есть живой подходящий ребёнок → блокируемся до его завершения.
@@ -337,15 +433,16 @@ fn try_collect_or_block(want_pid: i64) -> WaitResult {
 }
 
 /// Ждёт завершения ребёнка текущего процесса (M6f4). `want_pid > 0` — конкретный PID, иначе
-/// любой. Возвращает `Some((pid, код_выхода))` собранного ребёнка или `None`, если детей нет
-/// (`-ECHILD`). Блокирует вызывающего (уступая CPU), пока подходящий ребёнок не завершится.
+/// любой. Возвращает `Some((pid, код_выхода, сигнал))` собранного ребёнка (`сигнал` — `Some`,
+/// если убит сигналом) или `None`, если детей нет (`-ECHILD`). Блокирует вызывающего (уступая
+/// CPU), пока подходящий ребёнок не завершится.
 ///
 /// Блокировка корректна только потому, что `syscall` теперь идёт на СВОЁМ ядровом стеке
 /// процесса (M6f4): уступив CPU из середины вызова, мы не затираем чужой кадр на общем стеке.
-pub fn wait_current(want_pid: i64) -> Option<(u32, i32)> {
+pub fn wait_current(want_pid: i64) -> Option<(u32, i32, Option<u8>)> {
     loop {
         match try_collect_or_block(want_pid) {
-            WaitResult::Collected(pid, status) => return Some((pid, status)),
+            WaitResult::Collected(pid, status, signal) => return Some((pid, status, signal)),
             WaitResult::NoChildren => return None,
             WaitResult::WouldBlock => {
                 // Текущий помечен `Blocked` (атомарно со сканом). Уступаем CPU; вернёмся сюда,

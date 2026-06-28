@@ -46,6 +46,9 @@ pub static FORKTEST_ELF: &[u8] = include_bytes!(env!("USER_FORKTEST_ELF"));
 /// Встроенная проверка `fork`+`wait4` (M6f4): родитель дожидается ребёнка и проверяет его статус.
 pub static WAITTEST_ELF: &[u8] = include_bytes!(env!("USER_WAITTEST_ELF"));
 
+/// Встроенная проверка `kill` (M6f5): родитель убивает ребёнка SIGTERM и проверяет статус.
+pub static KILLTEST_ELF: &[u8] = include_bytes!(env!("USER_KILLTEST_ELF"));
+
 /// Почему ELF не удалось загрузить.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfError {

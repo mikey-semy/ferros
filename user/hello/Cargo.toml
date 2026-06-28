@@ -46,6 +46,11 @@ path = "src/forktest.rs"
 name = "waittest"
 path = "src/waittest.rs"
 
+# Проверка kill (M6f5): родитель убивает ребёнка SIGTERM и проверяет статус через wait4.
+[[bin]]
+name = "killtest"
+path = "src/killtest.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"
