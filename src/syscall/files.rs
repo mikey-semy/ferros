@@ -492,6 +492,27 @@ fn read_stdin(buf: u64, count: u64) -> i64 {
     }
 }
 
+/// `mkdir(path, mode)` (M7f): создаёт каталог по пути (резолвится от cwd). `mode` игнорируем.
+/// `-EEXIST`, если имя занято; `-ENOENT`, если родителя нет; иначе соответствующий `-errno`.
+pub fn sys_mkdir(path_ptr: u64, _mode: u64) -> i64 {
+    let path = match uaccess::read_user_cstr(path_ptr) {
+        Ok(p) => p,
+        Err(errno) => return -errno,
+    };
+    let path = match core::str::from_utf8(&path) {
+        Ok(s) => s,
+        Err(_) => return -abi::ENOENT,
+    };
+    if path.is_empty() {
+        return -abi::ENOENT;
+    }
+    let resolved = resolve_path(path);
+    match crate::fs::mkdir(&resolved) {
+        Ok(()) => 0,
+        Err(e) => -fat_errno(e),
+    }
+}
+
 /// Преобразует ошибку FAT в errno для возврата пользователю.
 fn fat_errno(e: crate::fs::fat::FatError) -> i64 {
     use crate::fs::fat::FatError;
@@ -499,6 +520,7 @@ fn fat_errno(e: crate::fs::fat::FatError) -> i64 {
         FatError::NotFound => abi::ENOENT,
         FatError::IsADirectory => abi::EISDIR,
         FatError::NotADirectory => abi::ENOTDIR,
+        FatError::AlreadyExists => abi::EEXIST,
         FatError::NoSpace | FatError::DirFull => abi::ENOSPC,
         _ => abi::EIO,
     }

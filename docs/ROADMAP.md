@@ -1,14 +1,13 @@
 # ferros — Roadmap
 
 Each milestone is a complete, observable result ("it now does X") and ends with a
-merged PR. We detail a milestone only when we reach it. Current status: **M6 done**
-(PCI enumeration; virtio-blk disk over DMA; hand-rolled FAT32 read; fault-tolerant
-`uaccess`; VFS + `open`/`read`/`close`/`lseek` — a user process reads a file from disk;
-M0–M5 merged). **Now in the pre-M7 "maturity" consolidation:** memory reclamation
-(M6e — freeing frame allocator, address-space teardown, process reaping) is **done**,
-and the process model (M6f) is **done** — PIDs/`getpid`, `execve`, `fork`, `wait4`, and
-basic signals give a full Unix-process core. Filesystem breadth (write + subdirectories +
-a real VFS) remains before **M7** (init process + shell).
+merged PR. We detail a milestone only when we reach it. Current status: **M7 done**
+(M0–M6 merged). ferros now **boots into an interactive shell**: keyboard input via
+`read(0)`, programs launched with arguments (`fork`/`execve` with argv + `wait4`), a
+per-process working directory (`cd`/`pwd`/relative paths), and `echo`/`cat`/`ls`/`mkdir`
+in `/bin`. The full Unix-process core (PIDs, `fork`/`execve`/`wait4`, basic signals,
+memory reclamation) and a readable-writable hierarchical FAT32 underpin it. **Next: M8
+(networking) or M9 (POSIX/libc)** — plus deferred shell features (redirection/pipes).
 
 > **North star (D8):** run the existing **Linux** software ecosystem rather than write a
 > native app ecosystem from scratch. Long-term aim is **ABI-level** compatibility
@@ -88,8 +87,10 @@ a real VFS) remains before **M7** (init process + shell).
     process list), and a `shell` launched as PID 1: a no-alloc REPL over stdin with builtins
     `cd`/`pwd`/`exit` and external programs via `fork`/`execve`/`wait4`. Console reads are now
     one line per `read(0)` (canonical). Boot lands in an interactive `/$ ` prompt.
-  - **M7f — coreutils** in `/bin` (`ls`/`cat`/`echo`/`mkdir`/`pwd`) + the syscalls they need
-    (`mkdir`, …). Redirection/pipes (`dup2`/`pipe`) optional after.
+  - **M7f — coreutils** (done). `echo`/`cat`/`ls`/`mkdir` as external ELF in `/bin`; the shell
+    resolves a bare command name to `/bin/<cmd>` (one-dir PATH). New `mkdir(2)` syscall (the FAT
+    `mkdir` from M6g4 reaches ring 3). Boot has a usable command set. Redirection/pipes
+    (`dup2`/`pipe`) deferred.
 
 ## Tier D — A "real" OS
 

@@ -65,6 +65,7 @@ pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
         abi::SYS_LSEEK => files::sys_lseek(args[0], args[1] as i64, args[2]),
         abi::SYS_CHDIR => files::sys_chdir(args[0]),
         abi::SYS_GETCWD => files::sys_getcwd(args[0], args[1]),
+        abi::SYS_MKDIR => files::sys_mkdir(args[0], args[1]),
         abi::SYS_GETPID => crate::sched::thread::current_pid() as i64,
         abi::SYS_WAIT4 => sys_wait4(args[0] as i64, args[1]),
         abi::SYS_KILL => sys_kill(args[0] as i64, args[1]),
