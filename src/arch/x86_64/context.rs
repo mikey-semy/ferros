@@ -217,6 +217,14 @@ pub unsafe fn switch_task(old_rsp: *mut u64, new_rsp: u64, next_cr3: PhysFrame, 
     // SAFETY: rsp0 пишем с IF=0 (требование set_kernel_stack).
     unsafe { gdt::set_kernel_stack(VirtAddr::new(next_rsp0)) };
 
+    // Тот же стек — под `syscall` этого процесса (M6f4): блокирующий вызов (`wait`) уступает
+    // CPU из середины обработки syscall, не затирая чужой кадр на общем стеке. Только для задач
+    // со своим ядровым стеком (rsp0 != 0); у «нулевого» потока ядра его нет, но он и не делает
+    // syscall'ов, поэтому прежнее значение оставляем.
+    if next_rsp0 != 0 {
+        super::syscall::set_syscall_stack(next_rsp0);
+    }
+
     let (active, flags) = Cr3::read();
     if next_cr3 != active {
         // SAFETY: next_cr3 — валидный PML4 с отображённым ядром; переключаемся на него.
