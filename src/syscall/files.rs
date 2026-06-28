@@ -48,6 +48,9 @@ struct OpenFile {
     writable: bool,
     /// Есть ли несброшенные изменения (нужно записать на диск при `close`).
     dirty: bool,
+    /// Это каталог (M6g5): `data` хранит сериализованные записи `getdents64`, `offset` — байтовый
+    /// курсор по ним. `read`/`write` на каталоге — ошибка; листинг идёт через `getdents64`.
+    is_dir: bool,
 }
 
 /// Реестр таблиц дескрипторов по процессам: ключ — физический адрес PML4 (CR3) процесса.
@@ -120,9 +123,10 @@ fn alloc_fd(fds: &mut Vec<Option<OpenFile>>, file: OpenFile) -> i64 {
     }
 }
 
-/// `open(path, flags, mode)` — открывает файл и возвращает дескриптор. Поддержаны режим доступа
-/// (`O_RDONLY`/`O_WRONLY`/`O_RDWR`), `O_CREAT` (создать, если нет) и `O_TRUNC` (обрезать до нуля
-/// при открытии); `mode` игнорируем. `path` — нуль-терминированная строка в памяти пользователя.
+/// `open(path, flags, mode)` — открывает файл ИЛИ каталог и возвращает дескриптор. Для файла
+/// поддержаны режим доступа (`O_RDONLY`/`O_WRONLY`/`O_RDWR`), `O_CREAT` и `O_TRUNC`; `mode`
+/// игнорируем. Каталог открывается только на чтение — его листинг идёт через `getdents64`
+/// (M6g5). `path` — нуль-терминированная строка в памяти пользователя.
 pub fn sys_open(path_ptr: u64, flags: u64) -> i64 {
     let path = match uaccess::read_user_cstr(path_ptr) {
         Ok(p) => p,
@@ -137,43 +141,130 @@ pub fn sys_open(path_ptr: u64, flags: u64) -> i64 {
     let create = flags & abi::O_CREAT != 0;
     let truncate = flags & abi::O_TRUNC != 0;
 
-    // Существующее содержимое (или его отсутствие).
-    let data = match crate::fs::open(path) {
-        Ok(existing) => {
-            if truncate {
-                // O_TRUNC: обрезаем на диске сразу (как в Linux — при открытии).
+    // Узнаём, файл это или каталог (или чего нет). Один проход по ФС.
+    let open_file = match crate::fs::lookup(path) {
+        Ok(crate::fs::fat::Node::File(existing)) => {
+            // Обычный файл. O_TRUNC обрезает на диске сразу (как в Linux — при открытии).
+            let data = if truncate {
                 if let Err(e) = crate::fs::write_file(path, &[]) {
-                    return -write_errno(e);
+                    return -fat_errno(e);
                 }
                 Vec::new()
             } else {
                 existing
-            }
-        }
-        Err(_) if create => {
-            // O_CREAT и файла нет — создаём пустым сразу, чтобы он существовал и без записи.
-            if let Err(e) = crate::fs::write_file(path, &[]) {
-                return -write_errno(e);
-            }
-            Vec::new()
-        }
-        Err(_) => return -abi::ENOENT,
-    };
-
-    // На диске содержимое уже согласовано (existing/пустое после create/trunc), поэтому dirty=false
-    // до первой записи.
-    with_current_fds(|fds| {
-        alloc_fd(
-            fds,
+            };
             OpenFile {
                 name: String::from(path),
                 data,
                 offset: 0,
                 writable,
                 dirty: false,
-            },
-        )
+                is_dir: false,
+            }
+        }
+        Ok(crate::fs::fat::Node::Dir(items)) => {
+            // Каталог: на запись открыть нельзя; данные — сериализованные записи getdents64.
+            if writable {
+                return -abi::EISDIR;
+            }
+            OpenFile {
+                name: String::from(path),
+                data: serialize_dirents(&items),
+                offset: 0,
+                writable: false,
+                dirty: false,
+                is_dir: true,
+            }
+        }
+        Err(crate::fs::fat::FatError::NotFound) if create => {
+            // O_CREAT и файла нет — создаём пустым сразу, чтобы он существовал и без записи.
+            if let Err(e) = crate::fs::write_file(path, &[]) {
+                return -fat_errno(e);
+            }
+            OpenFile {
+                name: String::from(path),
+                data: Vec::new(),
+                offset: 0,
+                writable,
+                dirty: false,
+                is_dir: false,
+            }
+        }
+        Err(crate::fs::fat::FatError::NotFound) => return -abi::ENOENT,
+        Err(e) => return -fat_errno(e),
+    };
+
+    with_current_fds(|fds| alloc_fd(fds, open_file))
+}
+
+/// `getdents64(fd, buf, count)` — копирует записи каталога (М6g5) в буфер пользователя. Записи
+/// уже сериализованы в `data` при `open`; копируем из `offset` столько ЦЕЛЫХ записей, сколько
+/// влезает в `count`, и сдвигаем курсор. 0 — записи кончились. `-ENOTDIR`, если fd не каталог;
+/// `-EINVAL`, если буфер меньше одной записи.
+pub fn sys_getdents64(fd: u64, buf: u64, count: u64) -> i64 {
+    let fd = fd as usize;
+    let count = count as usize;
+    with_current_fds(|fds| {
+        let file = match fds.get_mut(fd).and_then(|slot| slot.as_mut()) {
+            Some(f) => f,
+            None => return -abi::EBADF,
+        };
+        if !file.is_dir {
+            return -abi::ENOTDIR;
+        }
+        let data = &file.data;
+        // Набираем целые записи (длина каждой — в d_reclen, поле u16 по смещению +16) от курсора.
+        let mut span = 0usize;
+        while file.offset + span < data.len() {
+            let rec = file.offset + span;
+            let reclen = u16::from_le_bytes([data[rec + 16], data[rec + 17]]) as usize;
+            if span + reclen > count {
+                break;
+            }
+            span += reclen;
+        }
+        if span == 0 {
+            // Либо записи кончились (вернём 0), либо буфер меньше одной записи (-EINVAL).
+            return if file.offset >= data.len() {
+                0
+            } else {
+                -abi::EINVAL
+            };
+        }
+        match uaccess::copy_to_user(buf, &data[file.offset..file.offset + span]) {
+            Ok(()) => {
+                file.offset += span;
+                span as i64
+            }
+            Err(errno) => -errno,
+        }
     })
+}
+
+/// Тип записи в `d_type` структуры `linux_dirent64`.
+const DT_DIR: u8 = 4;
+const DT_REG: u8 = 8;
+
+/// Сериализует записи каталога в поток структур `linux_dirent64` (Linux x86-64), как их ждёт
+/// `getdents64`: `d_ino u64`, `d_off i64`, `d_reclen u16`, `d_type u8`, затем нуль-терминированное
+/// имя; длина каждой записи выровнена вверх по 8 байт.
+fn serialize_dirents(items: &[crate::fs::fat::DirItem]) -> Vec<u8> {
+    /// Заголовок до имени: d_ino(8)+d_off(8)+d_reclen(2)+d_type(1) = 19 байт.
+    const HEADER: usize = 19;
+    let mut out = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let name = item.name.as_bytes();
+        let reclen = (HEADER + name.len() + 1).div_ceil(8) * 8; // +1 под нуль, выравнивание 8
+        let start = out.len();
+        out.resize(start + reclen, 0);
+        let rec = &mut out[start..start + reclen];
+        rec[0..8].copy_from_slice(&((i as u64) + 1).to_le_bytes()); // d_ino (псевдо, ненулевой)
+        rec[8..16].copy_from_slice(&((start + reclen) as i64).to_le_bytes()); // d_off — курсор за этой записью
+        rec[16..18].copy_from_slice(&(reclen as u16).to_le_bytes()); // d_reclen
+        rec[18] = if item.is_dir { DT_DIR } else { DT_REG }; // d_type
+        rec[HEADER..HEADER + name.len()].copy_from_slice(name); // имя (нуль уже стоит — буфер обнулён)
+    }
+    out
 }
 
 /// `write(fd, buf, count)` в обычный файл (fd ≥ 3, M6g3): копирует `count` байт из памяти
@@ -217,6 +308,10 @@ pub fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
             Some(f) => f,
             None => return -abi::EBADF,
         };
+        if file.is_dir {
+            // Каталог нельзя читать как файл — листинг идёт через getdents64.
+            return -abi::EISDIR;
+        }
         // Позиция могла уйти ЗА конец файла (`lseek` это разрешает) — тогда читаем 0 (EOF),
         // а не уходим в переполнение `len - offset`. `start` зажат в пределах файла.
         let len = file.data.len();
@@ -234,10 +329,13 @@ pub fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
     })
 }
 
-/// Преобразует ошибку записи FAT в errno для возврата пользователю.
-fn write_errno(e: crate::fs::fat::FatError) -> i64 {
+/// Преобразует ошибку FAT в errno для возврата пользователю.
+fn fat_errno(e: crate::fs::fat::FatError) -> i64 {
     use crate::fs::fat::FatError;
     match e {
+        FatError::NotFound => abi::ENOENT,
+        FatError::IsADirectory => abi::EISDIR,
+        FatError::NotADirectory => abi::ENOTDIR,
         FatError::NoSpace | FatError::DirFull => abi::ENOSPC,
         _ => abi::EIO,
     }
@@ -257,7 +355,7 @@ pub fn sys_close(fd: u64) -> i64 {
     };
     if file.writable && file.dirty {
         if let Err(e) = crate::fs::write_file(&file.name, &file.data) {
-            return -write_errno(e);
+            return -fat_errno(e);
         }
     }
     0

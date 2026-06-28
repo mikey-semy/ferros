@@ -56,6 +56,11 @@ path = "src/killtest.rs"
 name = "writetest"
 path = "src/writetest.rs"
 
+# Проверка листинга каталога (M6g5): читает корень через getdents64 и ищет HELLO.TXT.
+[[bin]]
+name = "lstest"
+path = "src/lstest.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"

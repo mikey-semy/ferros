@@ -35,6 +35,8 @@ pub const SYS_EXIT: u64 = 60;
 pub const SYS_WAIT4: u64 = 61;
 /// `kill(pid, sig)` — послать сигнал процессу (2a5, зарезервировано).
 pub const SYS_KILL: u64 = 62;
+/// `getdents64(fd, buf, count)` — прочитать записи каталога (для `ls`).
+pub const SYS_GETDENTS64: u64 = 217;
 /// `exit_group(status)` — завершить все потоки процесса (для нас пока то же, что `exit`).
 pub const SYS_EXIT_GROUP: u64 = 231;
 
@@ -72,6 +74,10 @@ pub const ENOENT: i64 = 2;
 pub const ESRCH: i64 = 3;
 /// Ошибка ввода-вывода (например, сбой записи на диск).
 pub const EIO: i64 = 5;
+/// Не каталог (ожидался каталог, например для `getdents64`).
+pub const ENOTDIR: i64 = 20;
+/// Является каталогом (нельзя `read`/`write` как файл).
+pub const EISDIR: i64 = 21;
 /// На устройстве не осталось места (нет свободных кластеров/записи каталога).
 pub const ENOSPC: i64 = 28;
 /// Неверный формат исполняемого файла (битый/неподдерживаемый ELF).
