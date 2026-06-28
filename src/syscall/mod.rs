@@ -41,6 +41,10 @@ pub static LAST_WRITE_SUM: AtomicU64 = AtomicU64::new(0);
 pub static LAST_WRITE_USER_RSP: AtomicU64 = AtomicU64::new(0);
 /// Код последнего `exit`/`exit_group`.
 pub static LAST_EXIT_CODE: AtomicI64 = AtomicI64::new(-1);
+/// Сумма кодов всех `exit`/`exit_group` с загрузки. Когда завершаются несколько процессов и
+/// порядок недетерминирован (например, родитель и ребёнок после `fork`), сумма позволяет
+/// проверить НАБОР кодов независимо от порядка (тест M6f3).
+pub static EXIT_CODE_SUM: AtomicI64 = AtomicI64::new(0);
 /// Сколько раз вызывался `exit`/`exit_group` (тест проверяет, что завершение случилось).
 pub static EXIT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Сколько пользовательских процессов было завершено из-за сбоя в кольце 3 (page fault /
@@ -62,6 +66,7 @@ pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
         abi::SYS_EXIT | abi::SYS_EXIT_GROUP => {
             let status = args[0] as i32;
             LAST_EXIT_CODE.store(status as i64, Ordering::SeqCst);
+            EXIT_CODE_SUM.fetch_add(status as i64, Ordering::SeqCst);
             EXIT_CALLS.fetch_add(1, Ordering::SeqCst);
             // Завершаем текущий поток (с кодом возврата): планировщик пометит его мёртвым и
             // уйдёт на другой. Не возвращается — в `rax` ничего не кладётся, `sysret` не будет.

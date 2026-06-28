@@ -36,6 +36,11 @@ path = "src/getpidtest.rs"
 name = "exectest"
 path = "src/exectest.rs"
 
+# Проверка fork (M6f3): форкается; ребёнок и родитель выходят с разными кодами.
+[[bin]]
+name = "forktest"
+path = "src/forktest.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"
