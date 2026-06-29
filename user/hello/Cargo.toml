@@ -117,6 +117,11 @@ path = "src/rmdir.rs"
 name = "brktest"
 path = "src/brktest.rs"
 
+# Проверка TLS (M9b): arch_prctl(ARCH_SET_FS) + чтение через fs:. Встраивается в ядро.
+[[bin]]
+name = "tlstest"
+path = "src/tlstest.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"

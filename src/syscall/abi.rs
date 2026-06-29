@@ -52,10 +52,20 @@ pub const SYS_EXIT: u64 = 60;
 pub const SYS_WAIT4: u64 = 61;
 /// `kill(pid, sig)` — послать сигнал процессу (2a5, зарезервировано).
 pub const SYS_KILL: u64 = 62;
+/// `arch_prctl(code, addr)` — арх-специфичные настройки потока (M9b): у нас — база сегмента FS
+/// под TLS (`ARCH_SET_FS`/`ARCH_GET_FS`). libc держит `errno` и thread-local в TLS через FS.
+pub const SYS_ARCH_PRCTL: u64 = 158;
 /// `getdents64(fd, buf, count)` — прочитать записи каталога (для `ls`).
 pub const SYS_GETDENTS64: u64 = 217;
 /// `exit_group(status)` — завершить все потоки процесса (для нас пока то же, что `exit`).
 pub const SYS_EXIT_GROUP: u64 = 231;
+
+// --- Подкоманды arch_prctl(2) (Linux x86-64, M9b) ---
+
+/// Установить базу сегмента FS (адрес блока TLS) текущего потока.
+pub const ARCH_SET_FS: u64 = 0x1002;
+/// Прочитать базу сегмента FS текущего потока в `*addr`.
+pub const ARCH_GET_FS: u64 = 0x1003;
 
 // --- Флаги open(2) (Linux x86-64) ---
 
