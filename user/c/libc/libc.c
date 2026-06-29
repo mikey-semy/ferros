@@ -94,12 +94,103 @@ size_t strlen(const char *s) {
     return n;
 }
 
+void *memmove(void *dst, const void *src, size_t n) {
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    if (d < s) {
+        while (n--) { /* копируем вперёд: dst раньше src — переписывать слева направо безопасно */
+            *d++ = *s++;
+        }
+    } else if (d > s) {
+        d += n; /* копируем назад: dst позже src — иначе затёрли бы ещё не прочитанное */
+        s += n;
+        while (n--) {
+            *--d = *--s;
+        }
+    }
+    return dst;
+}
+
+int memcmp(const void *a, const void *b, size_t n) {
+    const unsigned char *p = (const unsigned char *)a;
+    const unsigned char *q = (const unsigned char *)b;
+    while (n--) {
+        if (*p != *q) {
+            return (int)*p - (int)*q;
+        }
+        p++;
+        q++;
+    }
+    return 0;
+}
+
 int strcmp(const char *a, const char *b) {
     while (*a && *a == *b) {
         a++;
         b++;
     }
     return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+int strncmp(const char *a, const char *b, size_t n) {
+    while (n > 0 && *a != '\0' && *a == *b) {
+        a++;
+        b++;
+        n--;
+    }
+    if (n == 0) {
+        return 0; /* сравнили первые n символов — равны */
+    }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+char *strcpy(char *dst, const char *src) {
+    char *r = dst;
+    while ((*dst++ = *src++) != '\0') {
+        /* копируем включая завершающий нуль */
+    }
+    return r;
+}
+
+char *strncpy(char *dst, const char *src, size_t n) {
+    size_t i = 0;
+    for (; i < n && src[i] != '\0'; i++) {
+        dst[i] = src[i];
+    }
+    for (; i < n; i++) {
+        dst[i] = '\0'; /* добиваем нулями (как в C; терминатора может и не быть, если src длиннее n) */
+    }
+    return dst;
+}
+
+char *strchr(const char *s, int c) {
+    char ch = (char)c;
+    while (*s != '\0') {
+        if (*s == ch) {
+            return (char *)s;
+        }
+        s++;
+    }
+    return (ch == '\0') ? (char *)s : 0; /* strchr находит и завершающий '\0' */
+}
+
+int atoi(const char *s) {
+    while (*s == ' ' || *s == '\t' || *s == '\n') {
+        s++; /* пропускаем ведущие пробелы */
+    }
+    int sign = 1;
+    if (*s == '-') {
+        sign = -1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
+    int v = 0;
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10 + (*s - '0'); /* переполнение — UB, как у стандартного atoi */
+        s++;
+    }
+    return sign * v;
 }
 
 int putchar(int c) {

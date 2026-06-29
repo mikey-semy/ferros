@@ -90,6 +90,9 @@ pub static FPUTEST_ELF: &[u8] = include_bytes!(env!("USER_FPUTEST_ELF"));
 /// Проверка форматированного вывода libc (M9j): `snprintf`/`printf` со всеми спецификаторами.
 pub static PRINTFTEST_ELF: &[u8] = include_bytes!(env!("USER_PRINTFTEST_ELF"));
 
+/// Проверка строковых/мемори функций libc (M9k): `memmove`/`strncmp`/`strchr`/`atoi`/…
+pub static LIBCHECK_ELF: &[u8] = include_bytes!(env!("USER_LIBCHECK_ELF"));
+
 /// Встроенный запускатель (M7b): `execve("ARGVECHO", ["ARGVECHO","ping","pong"])` — проверяет
 /// передачу argv через execve. Целевой `ARGVECHO` лежит на диске.
 pub static EXECARGV_ELF: &[u8] = include_bytes!(env!("USER_EXECARGV_ELF"));
