@@ -46,6 +46,7 @@
 
 use super::gdt;
 use x86_64::registers::control::Cr3;
+use x86_64::registers::model_specific::FsBase;
 use x86_64::structures::paging::PhysFrame;
 use x86_64::VirtAddr;
 
@@ -209,13 +210,29 @@ pub fn current_address_space() -> PhysFrame {
 /// Память ядра отображена в КАЖДОМ адресном пространстве (общие L4-записи), поэтому всё,
 /// чего касается `switch_context` (стеки/таблицы ядра), доступно и после смены `CR3`.
 ///
+/// `next_fs_base` — база сегмента FS следующей задачи (её TLS-указатель, M9b): восстанавливаем её
+/// на каждом переключении, иначе TLS одного процесса протёк бы в другой (база FS — глобальный
+/// регистр CPU, MSR `IA32_FS_BASE`). У потоков ядра и не настроивших TLS процессов она 0.
+///
 /// # Safety
 /// Вызывать с **выключенными прерываниями** (как [`switch_context`]). `old_rsp`/`new_rsp` —
 /// валидные контексты потоков; `next_cr3` — корректный PML4, в котором отображено ядро;
-/// `next_rsp0` — вершина стека ядра следующей задачи.
-pub unsafe fn switch_task(old_rsp: *mut u64, new_rsp: u64, next_cr3: PhysFrame, next_rsp0: u64) {
+/// `next_rsp0` — вершина стека ядра следующей задачи; `next_fs_base` — каноничный адрес
+/// (валидатор в `arch_prctl` это гарантирует).
+pub unsafe fn switch_task(
+    old_rsp: *mut u64,
+    new_rsp: u64,
+    next_cr3: PhysFrame,
+    next_rsp0: u64,
+    next_fs_base: u64,
+) {
     // SAFETY: rsp0 пишем с IF=0 (требование set_kernel_stack).
     unsafe { gdt::set_kernel_stack(VirtAddr::new(next_rsp0)) };
+
+    // База FS следующей задачи (TLS). Пишем безусловно (в т.ч. 0 для потоков ядра): чужое
+    // значение в MSR не должно «прилипнуть» к следующей задаче. Адрес каноничен (его проверил
+    // `arch_prctl` перед сохранением), поэтому `VirtAddr::new` не паникует.
+    FsBase::write(VirtAddr::new(next_fs_base));
 
     // Тот же стек — под `syscall` этого процесса (M6f4): блокирующий вызов (`wait`) уступает
     // CPU из середины обработки syscall, не затирая чужой кадр на общем стеке. Только для задач

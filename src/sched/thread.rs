@@ -109,6 +109,11 @@ struct Thread {
     /// Вершина стека ядра этого потока — ставится в rsp0 при переключении на него (нужно
     /// для входа из кольца 3). У потоков ядра не используется.
     kernel_stack_top: u64,
+    /// База сегмента FS — указатель на блок TLS этого потока (M9b). Ставит `arch_prctl(ARCH_SET_FS)`;
+    /// планировщик восстанавливает её в MSR `IA32_FS_BASE` при каждом переключении на этот поток
+    /// (иначе TLS протёк бы между процессами). 0 — TLS не настроен (потоки ядра, новый процесс).
+    /// Наследуется при `fork`, сбрасывается в 0 при `execve` (новый образ настроит свой).
+    fs_base: u64,
     /// Состояние.
     state: State,
     /// Причина блокировки (осмысленна при `state == Blocked`): по ней побудчик понимает,
@@ -145,6 +150,7 @@ pub fn init() {
                 stack: None,
                 cr3: None,
                 kernel_stack_top: 0,
+                fs_base: 0,
                 state: State::Runnable,
                 blocked_on: BlockReason::None,
             }],
@@ -181,6 +187,7 @@ pub fn spawn(entry: extern "C" fn() -> !) {
         stack: Some(stack),
         cr3: None,
         kernel_stack_top: top as u64,
+        fs_base: 0, // поток ядра TLS не использует
         state: State::Runnable,
         blocked_on: BlockReason::None,
     });
@@ -189,10 +196,17 @@ pub fn spawn(entry: extern "C" fn() -> !) {
 /// Регистрирует **пользовательский процесс** как поток: `rsp` — начальный контекст в его
 /// ядровом стеке (подготовлен [`context::init_user_thread_stack`]), `cr3` — корень его
 /// адресного пространства, `kernel_stack_top` — вершина его ядрового стека (rsp0),
-/// `kstack` — память этого стека (держим живой). Создаётся арх-слоем ([`spawn_user`]).
+/// `kstack` — память этого стека (держим живой), `fs_base` — стартовая база TLS (0 у нового
+/// процесса из `spawn_user`; у ребёнка `fork` — копия родительской, M9b). Создаётся арх-слоем.
 ///
 /// [`spawn_user`]: crate::arch::x86_64::syscall::spawn_user
-pub fn add_user_task(rsp: u64, cr3: PhysFrame, kernel_stack_top: u64, kstack: Box<[u8]>) -> u32 {
+pub fn add_user_task(
+    rsp: u64,
+    cr3: PhysFrame,
+    kernel_stack_top: u64,
+    kstack: Box<[u8]>,
+    fs_base: u64,
+) -> u32 {
     let parent = current_pid();
     let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
     push_thread(Thread {
@@ -205,14 +219,40 @@ pub fn add_user_task(rsp: u64, cr3: PhysFrame, kernel_stack_top: u64, kstack: Bo
         stack: Some(kstack),
         cr3: Some(cr3),
         kernel_stack_top,
+        fs_base,
         state: State::Runnable,
         blocked_on: BlockReason::None,
     });
     pid
 }
 
+/// База сегмента FS (указатель TLS) текущего процесса (M9b). Читают `arch_prctl(ARCH_GET_FS)` и
+/// `fork` (ребёнок наследует базу родителя).
+pub fn current_fs_base() -> u64 {
+    interrupts::without_interrupts(|| {
+        SCHEDULER
+            .lock()
+            .as_ref()
+            .map_or(0, |s| s.threads[s.current].fs_base)
+    })
+}
+
+/// Ставит базу сегмента FS текущего процесса (M9b) — для `arch_prctl(ARCH_SET_FS)`. Только
+/// обновляет сохранённое значение; живой MSR пишет арх-слой (он же восстановит её при следующем
+/// переключении на этот поток из сохранённого значения).
+pub fn set_current_fs_base(fs_base: u64) {
+    interrupts::without_interrupts(|| {
+        if let Some(sched) = SCHEDULER.lock().as_mut() {
+            let cur = sched.current;
+            sched.threads[cur].fs_base = fs_base;
+        }
+    });
+}
+
 /// Меняет адресное пространство (CR3) ТЕКУЩЕГО потока на `new` и возвращает старое — для
 /// `execve` (M6f2), который заменяет образ процесса, оставляя его поток/стек ядра прежними.
+/// Заодно **сбрасывает базу TLS (FS) в 0** (M9b): новый образ — чистый, свою TLS он настроит сам
+/// через `arch_prctl` (как в Linux). Живой MSR обнулит арх-слой `execve` после этого вызова.
 ///
 /// # Panics
 /// Если текущий поток — поток ядра (без своего адресного пространства).
@@ -225,6 +265,7 @@ pub fn exec_replace_cr3(new: PhysFrame) -> PhysFrame {
             .cr3
             .expect("exec on a kernel thread (no address space)");
         sched.threads[cur].cr3 = Some(new);
+        sched.threads[cur].fs_base = 0;
         old
     })
 }
@@ -678,7 +719,8 @@ fn switch_to_next() -> bool {
                         let new_rsp = sched.threads[n].rsp;
                         let next_cr3 = sched.threads[n].cr3.unwrap_or(sched.kernel_cr3);
                         let next_rsp0 = sched.threads[n].kernel_stack_top;
-                        Some((old_rsp, new_rsp, next_cr3, next_rsp0))
+                        let next_fs_base = sched.threads[n].fs_base;
+                        Some((old_rsp, new_rsp, next_cr3, next_rsp0, next_fs_base))
                     }
                     None => {
                         // Других готовых нет. Если текущий жив — просто не переключаемся;
@@ -696,13 +738,13 @@ fn switch_to_next() -> bool {
     };
 
     match switch {
-        Some((old_rsp, new_rsp, next_cr3, next_rsp0)) => {
+        Some((old_rsp, new_rsp, next_cr3, next_rsp0, next_fs_base)) => {
             // SAFETY: прерывания выключены; указатели — из валидных контекстов потоков;
             // память ядра отображена в каждом адресном пространстве, поэтому переключение
             // (стеки/таблицы ядра) корректно и через смену CR3. Между отпусканием замка и
             // записью `*old_rsp` (начало switch_context) никакой код Vec не перелокует —
-            // IF=0.
-            unsafe { context::switch_task(old_rsp, new_rsp, next_cr3, next_rsp0) };
+            // IF=0. `next_fs_base` каноничен (его проверил arch_prctl).
+            unsafe { context::switch_task(old_rsp, new_rsp, next_cr3, next_rsp0, next_fs_base) };
             true
         }
         None => false,
