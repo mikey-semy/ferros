@@ -19,6 +19,7 @@ const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
+const SYS_PIPE: u64 = 22;
 const SYS_DUP2: u64 = 33;
 const SYS_FORK: u64 = 57;
 const SYS_EXECVE: u64 = 59;
@@ -228,14 +229,10 @@ struct Redirects {
     append: bool,
 }
 
-/// Вынимает из `argv` операторы редиректа `<`/`>`/`>>` и их цели, складывая прочие слова в
-/// `clean` (с завершающим `NULL`). Возвращает число слов в `clean` и сами редиректы. Оператор
-/// без следующей цели игнорируется. Операторы должны быть отдельными словами (вокруг — пробелы).
-fn parse_redirects(
-    argv: &[*const u8; MAX_ARGS],
-    argc: usize,
-    clean: &mut [*const u8; MAX_ARGS],
-) -> (usize, Redirects) {
+/// Вынимает из `tokens` (слова одной команды) операторы редиректа `<`/`>`/`>>` и их цели,
+/// складывая прочие слова в `clean` (с завершающим `NULL`). Возвращает число слов в `clean` и сами
+/// редиректы. Оператор без следующей цели игнорируется. Операторы — отдельные слова (вокруг пробелы).
+fn parse_redirects(tokens: &[*const u8], clean: &mut [*const u8; MAX_ARGS]) -> (usize, Redirects) {
     let mut clean_argc = 0;
     let mut redir = Redirects {
         in_path: ptr::null(),
@@ -243,8 +240,9 @@ fn parse_redirects(
         append: false,
     };
     let mut i = 0;
-    while i < argc {
-        let tok = argv[i];
+    // Оставляем место под завершающий NULL (clean_argc ≤ MAX_ARGS-1).
+    while i < tokens.len() && clean_argc < MAX_ARGS - 1 {
+        let tok = tokens[i];
         // SAFETY: tok — нуль-терминированное слово в буфере строки.
         let (out, app, inp) = unsafe {
             (
@@ -254,8 +252,8 @@ fn parse_redirects(
             )
         };
         if out || app || inp {
-            if i + 1 < argc {
-                let target = argv[i + 1];
+            if i + 1 < tokens.len() {
+                let target = tokens[i + 1];
                 if inp {
                     redir.in_path = target;
                 } else {
@@ -274,6 +272,83 @@ fn parse_redirects(
     }
     clean[clean_argc] = ptr::null();
     (clean_argc, redir)
+}
+
+/// Индекс первого `|` в словах команды (для пайплайна), либо `None`.
+fn find_pipe(tokens: &[*const u8]) -> Option<usize> {
+    tokens.iter().position(|&t| unsafe { cstr_eq(t, b"|") })
+}
+
+/// Заменяет образ ребёнка запрошенной программой: применяет редиректы, резолвит команду (голое имя
+/// → `/bin`, путь с `/` — как есть) и `execve`. Не возвращается; при неудаче — код 127.
+///
+/// # Safety
+/// Вызывать ТОЛЬКО в дочернем процессе (меняет его дескрипторы). `cmd_argv` нуль-терминирован.
+unsafe fn exec_command(cmd_argv: &[*const u8; MAX_ARGS], redir: &Redirects) -> ! {
+    apply_redirects(redir);
+    let mut pathbuf = [0u8; 256];
+    let cmd = if has_slash(cmd_argv[0]) {
+        cmd_argv[0]
+    } else {
+        build_bin_path(&mut pathbuf, cmd_argv[0])
+    };
+    sc3(SYS_EXECVE, cmd as u64, cmd_argv.as_ptr() as u64, 0);
+    write_str(b"ferros: command not found\n");
+    sys_exit(127);
+}
+
+/// Запускает пайплайн `left | right` (M7g2): создаёт канал, форкает два процесса (stdout левого →
+/// канал → stdin правого) и ждёт оба. Родитель ОБЯЗАН закрыть оба конца канала, иначе правый не
+/// увидит EOF. Поддержан один `|` (две команды).
+///
+/// # Safety
+/// `*_argv` нуль-терминированы; вызывать из shell-процесса (форкает детей).
+unsafe fn run_pipeline(
+    left_argv: &[*const u8; MAX_ARGS],
+    left_redir: &Redirects,
+    right_argv: &[*const u8; MAX_ARGS],
+    right_redir: &Redirects,
+) {
+    let mut fds = [0i32; 2];
+    if sc1(SYS_PIPE, fds.as_mut_ptr() as u64) < 0 {
+        write_str(b"ferros: pipe failed\n");
+        return;
+    }
+    let (rfd, wfd) = (fds[0] as u64, fds[1] as u64);
+
+    // Левый: stdout → конец записи канала.
+    let lpid = sc0(SYS_FORK);
+    if lpid == 0 {
+        sc2(SYS_DUP2, wfd, 1);
+        sc1(SYS_CLOSE, rfd);
+        sc1(SYS_CLOSE, wfd);
+        exec_command(left_argv, left_redir);
+    }
+    if lpid < 0 {
+        // Левый форк не удался — без него пайплайн бессмыслен; закрываем оба конца и выходим.
+        write_str(b"ferros: fork failed\n");
+        sc1(SYS_CLOSE, rfd);
+        sc1(SYS_CLOSE, wfd);
+        return;
+    }
+    // Правый: stdin → конец чтения канала.
+    let rpid = sc0(SYS_FORK);
+    if rpid == 0 {
+        sc2(SYS_DUP2, rfd, 0);
+        sc1(SYS_CLOSE, rfd);
+        sc1(SYS_CLOSE, wfd);
+        exec_command(right_argv, right_redir);
+    }
+
+    // Родитель: закрываем оба конца (иначе правый не дождётся EOF), ждём обоих детей.
+    sc1(SYS_CLOSE, rfd);
+    sc1(SYS_CLOSE, wfd);
+    if lpid > 0 {
+        sc4(SYS_WAIT4, lpid as u64, 0, 0, 0);
+    }
+    if rpid > 0 {
+        sc4(SYS_WAIT4, rpid as u64, 0, 0, 0);
+    }
 }
 
 /// Применяет редиректы в ДОЧЕРНЕМ процессе перед `execve`: открывает файлы и `dup2` их на fd 0/1.
@@ -339,9 +414,24 @@ pub extern "C" fn _start() -> ! {
             continue; // пустая строка
         }
 
+        // Пайплайн `left | right` (M7g2)? Делим по первому `|` и запускаем два процесса.
+        if let Some(pidx) = find_pipe(&argv[..argc]) {
+            let mut lclean = [ptr::null::<u8>(); MAX_ARGS];
+            let (lc, lredir) = parse_redirects(&argv[..pidx], &mut lclean);
+            let mut rclean = [ptr::null::<u8>(); MAX_ARGS];
+            let (rc, rredir) = parse_redirects(&argv[pidx + 1..argc], &mut rclean);
+            if lc == 0 || rc == 0 {
+                write_str(b"ferros: syntax error near `|`\n");
+                continue;
+            }
+            // SAFETY: clean-argv'ы нуль-терминированы; запускаем из shell-процесса.
+            unsafe { run_pipeline(&lclean, &lredir, &rclean, &rredir) };
+            continue;
+        }
+
         // Вынимаем редиректы (`<`/`>`/`>>` + цели); в `cmd_argv` остаётся команда с аргументами.
         let mut cmd_argv = [ptr::null::<u8>(); MAX_ARGS];
-        let (cmd_argc, redir) = parse_redirects(&argv, argc, &mut cmd_argv);
+        let (cmd_argc, redir) = parse_redirects(&argv[..argc], &mut cmd_argv);
         if cmd_argc == 0 {
             continue; // только редирект без команды
         }
@@ -386,30 +476,12 @@ pub extern "C" fn _start() -> ! {
         }
 
         // --- Внешняя программа: fork + (редиректы) + execve + wait4 ---
-        // Голое имя (без `/`) ищем в `/bin`; путь (с `/`) исполняем как есть (ядро резолвит его
-        // от cwd). Буфер пути строим ДО fork — ребёнок (копия) унаследует его.
-        let mut pathbuf = [0u8; 256];
-        // SAFETY: cmd_argv[0] нуль-терминирован; pathbuf — наш буфер.
-        let cmd = unsafe {
-            if has_slash(cmd_argv[0]) {
-                cmd_argv[0]
-            } else {
-                build_bin_path(&mut pathbuf, cmd_argv[0])
-            }
-        };
-
         // SAFETY: fork.
         let pid = unsafe { sc0(SYS_FORK) };
         if pid == 0 {
-            // Ребёнок: применяем редиректы (open+dup2 на 0/1), затем заменяем образ.
-            // SAFETY: в ребёнке; cmd/cmd_argv/redir — наша память; envp пуст (NULL).
-            unsafe {
-                apply_redirects(&redir);
-                sc3(SYS_EXECVE, cmd as u64, cmd_argv.as_ptr() as u64, 0);
-                // Сюда — только если execve не удался.
-                write_str(b"ferros: command not found\n");
-                sys_exit(127);
-            }
+            // Ребёнок: редиректы + замена образа (не возвращается).
+            // SAFETY: в ребёнке; cmd_argv/redir — наша память.
+            unsafe { exec_command(&cmd_argv, &redir) };
         } else if pid > 0 {
             // Родитель: дожидаемся завершения ребёнка (статус не разбираем).
             // SAFETY: wait4 с нашим (опциональным) буфером статуса = NULL.
