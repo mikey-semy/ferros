@@ -366,6 +366,15 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   them stay allocated until the address space is torn down on `exit`. Fine for the typical
   grow-mostly malloc pattern; a workload that repeatedly grows and shrinks a large heap would
   accrete page-table frames.
+- **`writev`/`fcntl` are minimal (M9f).** `writev`/`readv` loop the existing per-buffer
+  `write`/`read` (no single atomic vectored transfer — between two iovecs another writer could
+  interleave on a pipe; fine single-threaded). `fcntl` `F_DUPFD` copies the fd backing like `dup2`
+  (independent file buffer/offset, not a shared open-file description — POSIX `dup` shares it).
+  `F_SETFL`/`F_SETFD` are accepted but **ignored**: no `O_NONBLOCK` (all I/O stays blocking) and no
+  close-on-exec (an fd is never closed across `execve` — `FD_CLOEXEC` is a no-op). `F_GETFL` reports
+  only the access mode and **can't distinguish `O_WRONLY` from `O_RDWR`** (an open file tracks just a
+  `writable` bit, not the full access mode, so a write-only fd reads back as `O_RDWR`); status flags
+  aren't reported. Other `fcntl` commands (locks, `F_SETOWN`, …) → `-EINVAL`.
 - **No users/groups; `uname` is fixed strings (M9e).** `getuid`/`geteuid`/`getgid`/`getegid` all
   return 0 — there is no user/group model, no `setuid`/credentials, no permission enforcement
   (every process is effectively root). `getppid` is real (the thread's parent PID). `uname` returns

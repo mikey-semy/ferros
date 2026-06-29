@@ -21,6 +21,12 @@ pub const SYS_WRITE: u64 = 1;
 pub const SYS_OPEN: u64 = 2;
 /// `close(fd)`.
 pub const SYS_CLOSE: u64 = 3;
+/// `readv(fd, iov, iovcnt)` — векторное чтение в массив буферов `struct iovec` (M9f).
+pub const SYS_READV: u64 = 19;
+/// `writev(fd, iov, iovcnt)` — векторная запись из массива буферов (libc буферизует вывод) (M9f).
+pub const SYS_WRITEV: u64 = 20;
+/// `fcntl(fd, cmd, arg)` — управление дескриптором (дублирование/флаги) (M9f).
+pub const SYS_FCNTL: u64 = 72;
 /// `stat(path, statbuf)` — метаданные файла по пути в `struct stat` (M9c).
 pub const SYS_STAT: u64 = 4;
 /// `fstat(fd, statbuf)` — метаданные по дескриптору (M9c; для `isatty` и т.п.).
@@ -83,6 +89,22 @@ pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_CLOCK_GETTIME: u64 = 228;
 /// `exit_group(status)` — завершить все потоки процесса (для нас пока то же, что `exit`).
 pub const SYS_EXIT_GROUP: u64 = 231;
+
+// --- Команды fcntl(2) (Linux, M9f) ---
+
+/// Дублировать дескриптор в наименьший свободный ≥ `arg`.
+pub const F_DUPFD: u64 = 0;
+/// Прочитать флаги дескриптора (close-on-exec). У нас не отслеживаются → 0.
+pub const F_GETFD: u64 = 1;
+/// Установить флаги дескриптора. Игнорируем → 0.
+pub const F_SETFD: u64 = 2;
+/// Прочитать режим доступа/статус-флаги открытого файла.
+pub const F_GETFL: u64 = 3;
+/// Установить статус-флаги (например `O_NONBLOCK`). Игнорируем → 0.
+pub const F_SETFL: u64 = 4;
+
+/// Максимум элементов `iovec` в одном `readv`/`writev` (Linux `IOV_MAX`).
+pub const IOV_MAX: u64 = 1024;
 
 // --- Идентификаторы часов для clock_gettime(2) (Linux, M9d) ---
 

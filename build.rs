@@ -44,6 +44,7 @@ fn main() {
         "src/stattest.rs",
         "src/timetest.rs",
         "src/idtest.rs",
+        "src/ioveccheck.rs",
         "Cargo.toml",
         "Cargo.lock",
         "linker.ld",
@@ -75,6 +76,7 @@ fn main() {
         ("stattest", "USER_STATTEST_ELF"),
         ("timetest", "USER_TIMETEST_ELF"),
         ("idtest", "USER_IDTEST_ELF"),
+        ("ioveccheck", "USER_IOVECCHECK_ELF"),
     ];
 
     // Удаляем прошлые ELF перед сборкой: cargo не отслеживает linker.ld / target.json как

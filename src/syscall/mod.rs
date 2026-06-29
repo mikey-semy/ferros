@@ -61,6 +61,9 @@ pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
         abi::SYS_WRITE => files::sys_write(args[0], args[1], args[2], user_rsp),
         abi::SYS_OPEN => files::sys_open(args[0], args[1]),
         abi::SYS_READ => files::sys_read(args[0], args[1], args[2]),
+        abi::SYS_WRITEV => files::sys_writev(args[0], args[1], args[2], user_rsp),
+        abi::SYS_READV => files::sys_readv(args[0], args[1], args[2]),
+        abi::SYS_FCNTL => files::sys_fcntl(args[0], args[1], args[2]),
         abi::SYS_CLOSE => files::sys_close(args[0]),
         abi::SYS_BRK => files::sys_brk(args[0]),
         // lstat == stat: симссылок у нас нет, следовать не по чему.
