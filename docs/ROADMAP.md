@@ -148,7 +148,12 @@ Linux software → libc first): **M9a–M9f** built the libc-facing syscall surf
     `virtio_net_hdr`, `send`/`recv` of Ethernet frames. Tested by a deterministic **ARP round-trip**
     against the SLIRP gateway: ARP-who-has 10.0.2.2 → SLIRP's ARP reply (sender IP 10.0.2.2) comes
     back on RX.
-  - **M8c** — `smoltcp` integration (DHCP, ICMP ping). **M8d** — sockets.
+  - **M8c — `smoltcp` integration** (done). Vendored `smoltcp` 0.13 (no_std); `net::VirtioPhy`
+    adapts our driver to `smoltcp::phy::Device`; `net::dhcp_acquire` runs a DHCP client and gets an
+    IP. Tested: SLIRP's DHCP server leases the guest **10.0.2.15/24** — proving the whole stack
+    (our Device, ARP, UDP, DHCP) works end-to-end.
+  - **M8d** — ICMP ping / TCP sockets (via SLIRP services or a forwarded port), then a socket syscall
+    surface for ring 3.
 - **M10 — Graphics / GUI (optional, huge).** Framebuffer, compositor, window
   manager, toolkit.
 - **M11 — Real hardware.** UEFI boot (migrate off bootloader 0.9), drivers for a
