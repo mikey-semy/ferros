@@ -140,23 +140,31 @@ fn main() {
     generate_disk_image(&manifest);
 }
 
-/// Собирает пользовательские программы на **C** (M9g) — доказательство, что обычный C-код,
-/// собранный clang'ом, запускается на ferros. Свободностоящие (без libc/crt0); линкуются нашим
-/// `user/hello/linker.ld` (та же база и `ENTRY(_start)`, что у Rust-программ). Это фундамент под
-/// будущий порт libc, поэтому **clang теперь нужен для сборки** (как nightly Rust и QEMU).
+/// Собирает пользовательские программы на **C** через clang (M9g/M9h). Доказывает, что обычный
+/// C-код работает на ferros: сперва свободностоящий `hello` (свой `_start`, без libc), затем
+/// программа `demo` поверх **минимальной libc** (`user/c/libc`: crt0 + malloc/строки) со
+/// стандартным `int main()`. **clang+lld нужны для сборки** (как nightly Rust и QEMU).
 ///
-/// Модель кода `large`: пользовательская база `0x7F80_0000_0000` — высокий адрес, в который не
-/// достают 32-битные релокации модели `small` (по умолчанию). Линкуем через драйвер `clang`
-/// (`-fuse-ld=lld`), а не голый `ld.lld`: на Windows его флейвор выбирается по `--target`.
+/// Тонкости clang для нашего таргета: модель кода `large` (база `0x7F80_0000_0000` — высокий адрес,
+/// 32-битные релокации модели `small` до неё не достают); линковка через драйвер `clang`
+/// (`-fuse-ld=lld`); наш `user/hello/linker.ld` (та же база/`ENTRY(_start)`, что у Rust-программ).
 fn build_c_programs(manifest: &str) {
-    let src = PathBuf::from(manifest).join("user/c/hello.c");
+    let c_dir = PathBuf::from(manifest).join("user/c");
+    let libc_dir = c_dir.join("libc");
     let linker = PathBuf::from(manifest).join("user/hello/linker.ld");
-    println!("cargo:rerun-if-changed={}", src.display());
-    println!("cargo:rerun-if-changed={}", linker.display());
+    let out_dir =
+        PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set for build script"));
 
-    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set for build script");
-    let obj = PathBuf::from(&out_dir).join("hello_c.o");
-    let elf = PathBuf::from(&out_dir).join("hello_c");
+    for f in [
+        c_dir.join("hello.c"),
+        c_dir.join("demo.c"),
+        libc_dir.join("crt0.s"),
+        libc_dir.join("libc.c"),
+        libc_dir.join("libc.h"),
+        linker.clone(),
+    ] {
+        println!("cargo:rerun-if-changed={}", f.display());
+    }
 
     let clang_ok = Command::new("clang")
         .arg("--version")
@@ -169,35 +177,77 @@ fn build_c_programs(manifest: &str) {
          `clang` is on PATH."
     );
 
-    // Компиляция: свободностоящая, без PIE, large-модель кода, без red-zone (на user-стеке).
-    let compile = Command::new("clang")
-        .args([
-            "--target=x86_64-unknown-linux-gnu",
-            "-ffreestanding",
-            "-nostdlib",
-            "-fno-pie",
-            "-fno-stack-protector",
-            "-fno-asynchronous-unwind-tables",
-            "-mno-red-zone",
-            "-mcmodel=large",
-            "-O2",
-            "-c",
-        ])
-        .arg(&src)
-        .arg("-o")
-        .arg(&obj)
-        .status()
-        .expect("failed to run clang (compile C user program)");
-    assert!(
-        compile.success(),
-        "clang failed to compile {}",
-        src.display()
-    );
+    // M9g: свободностоящая `hello` (свой `_start`, без libc) — линкуется в одиночку.
+    let hello_o = clang_compile_c(&c_dir.join("hello.c"), &out_dir.join("hello.o"), &[]);
+    let hello_elf = clang_link(&[&hello_o], &out_dir.join("hello_c"), &linker);
+    println!("cargo:rustc-env=USER_HELLO_C_ELF={}", hello_elf.display());
 
-    // Линковка: статический ELF по нашему скрипту компоновки (база/точка входа как у Rust-программ).
-    // Скрипт передаём через `-Xlinker -T -Xlinker <путь>` (два отдельных токена), а НЕ `-Wl,-T,<путь>`:
-    // `clang` режет `-Wl,` по запятым, и путь с запятой сломал бы поиск скрипта (пробелы — ок).
-    let link = Command::new("clang")
+    // M9h: минимальная libc (crt0 + libc.c) + программа `demo` со стандартным `int main()`.
+    let crt0_o = clang_assemble(&libc_dir.join("crt0.s"), &out_dir.join("crt0.o"));
+    let libc_o = clang_compile_c(&libc_dir.join("libc.c"), &out_dir.join("libc.o"), &[]);
+    let inc = format!("-I{}", libc_dir.display());
+    let demo_o = clang_compile_c(&c_dir.join("demo.c"), &out_dir.join("demo.o"), &[&inc]);
+    let demo_elf = clang_link(
+        &[&crt0_o, &libc_o, &demo_o],
+        &out_dir.join("cdemo"),
+        &linker,
+    );
+    println!("cargo:rustc-env=USER_CDEMO_ELF={}", demo_elf.display());
+}
+
+/// Общие флаги компиляции C для пользовательского таргета ferros (см. [`build_c_programs`]).
+const CLANG_C_FLAGS: &[&str] = &[
+    "--target=x86_64-unknown-linux-gnu",
+    "-ffreestanding",
+    "-nostdlib",
+    "-fno-pie",
+    "-fno-stack-protector",
+    "-fno-asynchronous-unwind-tables",
+    "-mno-red-zone",
+    "-mcmodel=large",
+    "-O2",
+    "-c",
+];
+
+/// Компилирует C-файл `src` в объектник `obj` (+ доп. флаги `extra`, например `-I`). Возвращает `obj`.
+fn clang_compile_c(src: &std::path::Path, obj: &std::path::Path, extra: &[&str]) -> PathBuf {
+    let ok = Command::new("clang")
+        .args(CLANG_C_FLAGS)
+        .args(extra)
+        .arg(src)
+        .arg("-o")
+        .arg(obj)
+        .status()
+        .expect("failed to run clang (compile C)")
+        .success();
+    assert!(ok, "clang failed to compile {}", src.display());
+    obj.to_path_buf()
+}
+
+/// Ассемблирует `.s`-файл `src` в объектник `obj` (синтаксис задаёт директива в файле). Возвращает `obj`.
+fn clang_assemble(src: &std::path::Path, obj: &std::path::Path) -> PathBuf {
+    let ok = Command::new("clang")
+        .args(["--target=x86_64-unknown-linux-gnu", "-c"])
+        .arg(src)
+        .arg("-o")
+        .arg(obj)
+        .status()
+        .expect("failed to run clang (assemble)")
+        .success();
+    assert!(ok, "clang failed to assemble {}", src.display());
+    obj.to_path_buf()
+}
+
+/// Линкует объектники `objs` в статический ELF `elf` по скрипту компоновки `linker`. Возвращает `elf`.
+///
+/// Скрипт передаём через `-Xlinker -T -Xlinker <путь>` (два отдельных токена), а НЕ `-Wl,-T,<путь>`:
+/// `clang` режет `-Wl,` по запятым, и путь с запятой сломал бы поиск скрипта (пробелы — ок).
+fn clang_link(
+    objs: &[&std::path::Path],
+    elf: &std::path::Path,
+    linker: &std::path::Path,
+) -> PathBuf {
+    let ok = Command::new("clang")
         .args([
             "--target=x86_64-unknown-linux-gnu",
             "-nostdlib",
@@ -208,15 +258,15 @@ fn build_c_programs(manifest: &str) {
             "-T",
             "-Xlinker",
         ])
-        .arg(&linker)
-        .arg(&obj)
+        .arg(linker)
+        .args(objs)
         .arg("-o")
-        .arg(&elf)
+        .arg(elf)
         .status()
-        .expect("failed to run clang (link C user program)");
-    assert!(link.success(), "clang/lld failed to link {}", elf.display());
-
-    println!("cargo:rustc-env=USER_HELLO_C_ELF={}", elf.display());
+        .expect("failed to run clang (link)")
+        .success();
+    assert!(ok, "clang/lld failed to link {}", elf.display());
+    elf.to_path_buf()
 }
 
 /// Имя и содержимое тестового файла в образе. ВАЖНО: те же значения захардкожены в
