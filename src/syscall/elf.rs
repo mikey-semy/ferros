@@ -87,6 +87,9 @@ pub static CDEMO_ELF: &[u8] = include_bytes!(env!("USER_CDEMO_ELF"));
 /// Проверка сохранения FPU/SSE при переключении (M9i): `fork` + два процесса держат разные xmm0.
 pub static FPUTEST_ELF: &[u8] = include_bytes!(env!("USER_FPUTEST_ELF"));
 
+/// Проверка форматированного вывода libc (M9j): `snprintf`/`printf` со всеми спецификаторами.
+pub static PRINTFTEST_ELF: &[u8] = include_bytes!(env!("USER_PRINTFTEST_ELF"));
+
 /// Встроенный запускатель (M7b): `execve("ARGVECHO", ["ARGVECHO","ping","pong"])` — проверяет
 /// передачу argv через execve. Целевой `ARGVECHO` лежит на диске.
 pub static EXECARGV_ELF: &[u8] = include_bytes!(env!("USER_EXECARGV_ELF"));
