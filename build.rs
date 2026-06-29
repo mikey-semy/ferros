@@ -160,6 +160,7 @@ fn build_c_programs(manifest: &str) {
         c_dir.join("fputest.c"),
         c_dir.join("demo.c"),
         c_dir.join("printftest.c"),
+        c_dir.join("libcheck.c"),
         libc_dir.join("crt0.s"),
         libc_dir.join("libc.c"),
         libc_dir.join("libc.h"),
@@ -215,6 +216,22 @@ fn build_c_programs(manifest: &str) {
     println!(
         "cargo:rustc-env=USER_PRINTFTEST_ELF={}",
         printf_elf.display()
+    );
+
+    // M9k: программа `libcheck` поверх libc — проверяет строковые/мемори/atoi функции.
+    let libcheck_o = clang_compile_c(
+        &c_dir.join("libcheck.c"),
+        &out_dir.join("libcheck.o"),
+        &[&inc],
+    );
+    let libcheck_elf = clang_link(
+        &[&crt0_o, &libc_o, &libcheck_o],
+        &out_dir.join("libcheck"),
+        &linker,
+    );
+    println!(
+        "cargo:rustc-env=USER_LIBCHECK_ELF={}",
+        libcheck_elf.display()
     );
 }
 
