@@ -60,6 +60,7 @@ pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
         abi::SYS_OPEN => files::sys_open(args[0], args[1]),
         abi::SYS_READ => files::sys_read(args[0], args[1], args[2]),
         abi::SYS_CLOSE => files::sys_close(args[0]),
+        abi::SYS_PIPE => files::sys_pipe(args[0]),
         abi::SYS_DUP2 => files::sys_dup2(args[0], args[1]),
         abi::SYS_GETDENTS64 => files::sys_getdents64(args[0], args[1], args[2]),
         abi::SYS_LSEEK => files::sys_lseek(args[0], args[1] as i64, args[2]),
@@ -70,9 +71,10 @@ pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
         abi::SYS_WAIT4 => sys_wait4(args[0] as i64, args[1]),
         abi::SYS_KILL => sys_kill(args[0] as i64, args[1]),
         abi::SYS_EXIT | abi::SYS_EXIT_GROUP => {
-            // Сбрасываем незакрытые грязные файлы СИНХРОННО, пока процесс ещё жив (M7g1): иначе
-            // перенаправленный вывод не был бы durable к возврату родителя из `wait`.
-            files::flush_current_process();
+            // Закрываем дескрипторы СИНХРОННО, пока процесс ещё жив (M7g1/M7g2): сбрасываем грязные
+            // файлы (durable к возврату родителя из `wait`) и освобождаем концы каналов (другой
+            // конец сразу видит EOF). Иначе это сделал бы reaper — асинхронно и слишком поздно.
+            files::release_current_process_fds();
             let status = args[0] as i32;
             LAST_EXIT_CODE.store(status as i64, Ordering::SeqCst);
             EXIT_CODE_SUM.fetch_add(status as i64, Ordering::SeqCst);

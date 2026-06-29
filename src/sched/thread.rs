@@ -77,6 +77,9 @@ enum BlockReason {
     Child,
     /// Ждёт ввода в `read(0)` (M7a): будит завершённая строка ([`wake_stdin_readers`]).
     Stdin,
+    /// Ждёт на канале (M7g2): читатель ждёт данные/EOF, писатель — место. Будит
+    /// [`wake_pipe_waiters`] при записи/закрытии конца.
+    Pipe,
 }
 
 /// Контекст потока: сохранённый указатель стека плюс владение его памятью; для
@@ -523,6 +526,40 @@ pub fn wake_stdin_readers() {
         if let Some(sched) = guard.as_mut() {
             for t in sched.threads.iter_mut() {
                 if t.state == State::Blocked && t.blocked_on == BlockReason::Stdin {
+                    t.state = State::Runnable;
+                }
+            }
+        }
+    });
+}
+
+/// Блокирует ТЕКУЩИЙ процесс на канале (M7g2): метит `Blocked`/[`BlockReason::Pipe`] и уступает
+/// CPU. Возвращается, когда [`wake_pipe_waiters`] переведёт его в `Runnable` (другой конец что-то
+/// записал или закрылся) — вызывающий тогда перечитывает буфер канала.
+///
+/// # Безопасность вызова
+/// Звать с выключенными прерываниями, атомарно с проверкой состояния канала и БЕЗ удержания замка
+/// буфера канала (иначе writer не сможет его взять) — ровно как [`block_current_on_stdin`].
+pub fn block_current_on_pipe() {
+    {
+        let mut guard = SCHEDULER.lock();
+        let sched = guard.as_mut().expect("scheduler not initialized");
+        let cur = sched.current;
+        sched.threads[cur].state = State::Blocked;
+        sched.threads[cur].blocked_on = BlockReason::Pipe;
+    }
+    switch_to_next();
+}
+
+/// Будит все процессы, заблокированные на канале (M7g2). Зовётся при записи в канал, закрытии его
+/// конца (`Drop`) или исчерпании читателей. Разбуженные перечитают свой канал; кому делать нечего —
+/// заблокируются снова (ложная побудка безопасна).
+pub fn wake_pipe_waiters() {
+    interrupts::without_interrupts(|| {
+        let mut guard = SCHEDULER.lock();
+        if let Some(sched) = guard.as_mut() {
+            for t in sched.threads.iter_mut() {
+                if t.state == State::Blocked && t.blocked_on == BlockReason::Pipe {
                     t.state = State::Runnable;
                 }
             }
