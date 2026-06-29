@@ -938,6 +938,131 @@ pub fn sys_dup2(oldfd: u64, newfd: u64) -> i64 {
     })
 }
 
+/// Читает `index`-й `struct iovec { base: u64 @0; len: u64 @8 }` (16 байт) из массива в памяти
+/// пользователя по адресу `iov`. Адрес элемента считаем через `checked_add`: пользователь задаёт
+/// `iov` произвольным, и `iov + index*16` у самой вершины адресного пространства переполнился бы —
+/// в dev-профиле (overflow-checks включены) это уронило бы ЯДРО. На переполнении — `-EFAULT`.
+fn read_iovec(iov: u64, index: u64) -> Result<(u64, u64), i64> {
+    let slot = iov.checked_add(index * 16).ok_or(abi::EFAULT)?;
+    uaccess::with_user_bytes(slot, 16, |b| {
+        let base = u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+        let len = u64::from_le_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]);
+        (base, len)
+    })
+}
+
+/// `writev(fd, iov, iovcnt)` (M9f): записывает буферы массива `iovec` по порядку, как один `write`.
+/// libc буферизует вывод и сбрасывает его одним `writev`. Возвращает суммарно записанные байты;
+/// на ошибке первого буфера — `-errno`, на ошибке/короткой записи позже — уже записанное (POSIX).
+pub fn sys_writev(fd: u64, iov: u64, iovcnt: u64, user_rsp: u64) -> i64 {
+    if iovcnt > abi::IOV_MAX {
+        return -abi::EINVAL;
+    }
+    let mut total: i64 = 0;
+    for i in 0..iovcnt {
+        let (base, len) = match read_iovec(iov, i) {
+            Ok(v) => v,
+            Err(errno) => return if total == 0 { -errno } else { total },
+        };
+        if len == 0 {
+            continue;
+        }
+        let written = sys_write(fd, base, len, user_rsp);
+        if written < 0 {
+            return if total == 0 { written } else { total };
+        }
+        total += written;
+        if (written as u64) < len {
+            break; // короткая запись — дальше не продолжаем
+        }
+    }
+    total
+}
+
+/// `readv(fd, iov, iovcnt)` (M9f): читает в буферы массива `iovec` по порядку, как один `read`.
+/// Возвращает суммарно прочитанные байты; короткое чтение/EOF (меньше длины буфера) останавливает
+/// заполнение дальнейших буферов.
+pub fn sys_readv(fd: u64, iov: u64, iovcnt: u64) -> i64 {
+    if iovcnt > abi::IOV_MAX {
+        return -abi::EINVAL;
+    }
+    let mut total: i64 = 0;
+    for i in 0..iovcnt {
+        let (base, len) = match read_iovec(iov, i) {
+            Ok(v) => v,
+            Err(errno) => return if total == 0 { -errno } else { total },
+        };
+        if len == 0 {
+            continue;
+        }
+        let got = sys_read(fd, base, len);
+        if got < 0 {
+            return if total == 0 { got } else { total };
+        }
+        total += got;
+        if (got as u64) < len {
+            break; // короткое чтение / EOF
+        }
+    }
+    total
+}
+
+/// `fcntl(fd, cmd, arg)` (M9f): управление дескриптором. Поддержаны `F_DUPFD` (дублировать в
+/// наименьший свободный ≥ `arg`), `F_GETFL` (режим доступа по подложке) и no-op `F_GETFD`/`F_SETFD`/
+/// `F_SETFL` (флаги close-on-exec / `O_NONBLOCK` мы не отслеживаем). Прочие команды — `-EINVAL`.
+/// `F_DUPFD` копирует подложку (как `dup2`, не разделяя позицию файла — см. HARDENING).
+pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
+    match cmd {
+        abi::F_DUPFD => {
+            let start = arg as usize;
+            if start >= MAX_FDS {
+                return -abi::EINVAL;
+            }
+            with_current_fds(|fds| {
+                let backing = match fds.get(fd as usize).and_then(|s| s.as_ref()) {
+                    Some(b) => b.clone(),
+                    None => return -abi::EBADF,
+                };
+                // Наименьший свободный индекс ≥ start (за пределами вектора — тоже «свободен»).
+                let mut idx = start;
+                while idx < MAX_FDS && fds.get(idx).map(Option::is_some).unwrap_or(false) {
+                    idx += 1;
+                }
+                if idx >= MAX_FDS {
+                    return -abi::EMFILE;
+                }
+                while fds.len() <= idx {
+                    fds.push(None);
+                }
+                fds[idx] = Some(backing);
+                idx as i64
+            })
+        }
+        abi::F_GETFD | abi::F_SETFD | abi::F_SETFL => with_current_fds(|fds| {
+            if fds.get(fd as usize).and_then(|s| s.as_ref()).is_some() {
+                0
+            } else {
+                -abi::EBADF
+            }
+        }),
+        abi::F_GETFL => {
+            with_current_fds(|fds| match fds.get(fd as usize).and_then(|s| s.as_ref()) {
+                None => -abi::EBADF,
+                Some(Fd::Console) | Some(Fd::PipeRead(_)) => abi::O_RDONLY as i64,
+                Some(Fd::Vga) | Some(Fd::Serial) | Some(Fd::PipeWrite(_)) => abi::O_WRONLY as i64,
+                Some(Fd::File(f)) => {
+                    if f.writable {
+                        abi::O_RDWR as i64
+                    } else {
+                        abi::O_RDONLY as i64
+                    }
+                }
+            })
+        }
+        _ => -abi::EINVAL,
+    }
+}
+
 /// `pipe(fds)` (M7g2): создаёт канал и выдаёт два дескриптора — `fds[0]` конец чтения, `fds[1]`
 /// конец записи (как в Linux). Концы делят один буфер; данные из `write(fds[1])` читаются из
 /// `read(fds[0])`. Возвращает 0 или `-errno` (`-EMFILE`, если таблица полна; `-EFAULT` на плохом

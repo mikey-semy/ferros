@@ -137,6 +137,11 @@ path = "src/timetest.rs"
 name = "idtest"
 path = "src/idtest.rs"
 
+# Проверка writev/readv/fcntl (M9f) через канал. Встраивается в ядро.
+[[bin]]
+name = "ioveccheck"
+path = "src/ioveccheck.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"
