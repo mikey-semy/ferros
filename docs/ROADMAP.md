@@ -10,7 +10,7 @@ in `/bin`): keyboard input via `read(0)`, programs launched with arguments
 basic signals, memory reclamation) and a readable-writable hierarchical FAT32 underpin it.
 **Now on the libc track (M9), prioritized over M8 networking** per the north star (run
 Linux software → libc first): **M9a `brk`**, **M9b TLS (`arch_prctl`)**, **M9c `stat`/`fstat`**,
-**M9d time done**; next are the remaining libc-facing syscalls (`writev`/`fcntl`/`uname`/ids).
+**M9d time**, **M9e identity + `uname` done**; next: `writev`/`readv`/`fcntl`, then the relibc port.
 
 > **North star (D8):** run the existing **Linux** software ecosystem rather than write a
 > native app ecosystem from scratch. Long-term aim is **ABI-level** compatibility
@@ -117,8 +117,10 @@ Linux software → libc first): **M9a `brk`**, **M9b TLS (`arch_prctl`)**, **M9c
     `struct stat` (type + size + pseudo-inode) by exact ABI offsets; `fstat` distinguishes the fd
     backing (regular/dir/char-device/FIFO, so `isatty` works).
   - **M9d — time (`clock_gettime`/`gettimeofday`/`time`)** (done). Derives uptime from the PIT tick
-    counter (`u128` tick→ns conversion); REALTIME == MONOTONIC == uptime (no RTC yet). Then
-    `writev`/`fcntl`/`uname`/id syscalls — the rest of the libc-facing surface, then the relibc port.
+    counter (`u128` tick→ns conversion); REALTIME == MONOTONIC == uptime (no RTC yet).
+  - **M9e — identity + `uname`** (done). `getuid`/`geteuid`/`getgid`/`getegid` (all 0, single-user),
+    `getppid` (parent PID), `uname` (`struct utsname`: ferros/x86_64). Then `writev`/`readv`/`fcntl`
+    finish the libc-facing surface, and then the relibc port.
 - **M8 — Networking.** NIC driver (virtio-net / e1000), TCP/IP via `smoltcp`,
   ping, sockets.
 - **M10 — Graphics / GUI (optional, huge).** Framebuffer, compositor, window
