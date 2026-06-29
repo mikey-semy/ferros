@@ -681,6 +681,41 @@ pub fn sys_mkdir(path_ptr: u64, _mode: u64) -> i64 {
     }
 }
 
+/// `unlink(path)` (M7g3): удаляет файл (резолвится от cwd). `-EISDIR` на каталоге (для него
+/// `rmdir`); `-ENOENT`, если пути нет.
+pub fn sys_unlink(path_ptr: u64) -> i64 {
+    match path_arg(path_ptr) {
+        Ok(resolved) => match crate::fs::unlink(&resolved) {
+            Ok(()) => 0,
+            Err(e) => -fat_errno(e),
+        },
+        Err(errno) => -errno,
+    }
+}
+
+/// `rmdir(path)` (M7g3): удаляет ПУСТОЙ каталог. `-ENOTDIR` на файле; `-ENOTEMPTY`, если в каталоге
+/// есть записи; `-ENOENT`, если пути нет.
+pub fn sys_rmdir(path_ptr: u64) -> i64 {
+    match path_arg(path_ptr) {
+        Ok(resolved) => match crate::fs::rmdir(&resolved) {
+            Ok(()) => 0,
+            Err(e) => -fat_errno(e),
+        },
+        Err(errno) => -errno,
+    }
+}
+
+/// Читает путь-аргумент из памяти пользователя, проверяет на пустоту и резолвит от cwd. Возвращает
+/// нормализованный абсолютный путь или положительный `errno`. Общая часть `unlink`/`rmdir`.
+fn path_arg(path_ptr: u64) -> Result<String, i64> {
+    let path = uaccess::read_user_cstr(path_ptr)?;
+    let path = core::str::from_utf8(&path).map_err(|_| abi::ENOENT)?;
+    if path.is_empty() {
+        return Err(abi::ENOENT);
+    }
+    Ok(resolve_path(path))
+}
+
 /// Преобразует ошибку FAT в errno для возврата пользователю.
 fn fat_errno(e: crate::fs::fat::FatError) -> i64 {
     use crate::fs::fat::FatError;
@@ -689,6 +724,7 @@ fn fat_errno(e: crate::fs::fat::FatError) -> i64 {
         FatError::IsADirectory => abi::EISDIR,
         FatError::NotADirectory => abi::ENOTDIR,
         FatError::AlreadyExists => abi::EEXIST,
+        FatError::NotEmpty => abi::ENOTEMPTY,
         FatError::NoSpace | FatError::DirFull => abi::ENOSPC,
         _ => abi::EIO,
     }

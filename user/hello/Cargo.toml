@@ -104,6 +104,14 @@ path = "src/ls.rs"
 name = "mkdir"
 path = "src/mkdir.rs"
 
+[[bin]]
+name = "rm"
+path = "src/rm.rs"
+
+[[bin]]
+name = "rmdir"
+path = "src/rmdir.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"

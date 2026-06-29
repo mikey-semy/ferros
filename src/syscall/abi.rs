@@ -35,6 +35,10 @@ pub const SYS_GETCWD: u64 = 79;
 pub const SYS_CHDIR: u64 = 80;
 /// `mkdir(path, mode)` — создать каталог (M7f; `mode` игнорируем).
 pub const SYS_MKDIR: u64 = 83;
+/// `rmdir(path)` — удалить пустой каталог (M7g3).
+pub const SYS_RMDIR: u64 = 84;
+/// `unlink(path)` — удалить файл (M7g3).
+pub const SYS_UNLINK: u64 = 87;
 /// `fork()` — создать копию процесса (2a3, зарезервировано).
 pub const SYS_FORK: u64 = 57;
 /// `execve(path, argv, envp)` — заменить образ процесса (2a2, зарезервировано).
@@ -118,5 +122,7 @@ pub const EINVAL: i64 = 22;
 pub const EMFILE: i64 = 24;
 /// Системный вызов не реализован.
 pub const ENOSYS: i64 = 38;
+/// Каталог не пуст (для `rmdir`, M7g3).
+pub const ENOTEMPTY: i64 = 39;
 /// Результат не помещается в переданный буфер (например, `getcwd` с малым `size`, M7c).
 pub const ERANGE: i64 = 34;
