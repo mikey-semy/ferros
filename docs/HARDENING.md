@@ -251,19 +251,25 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   allocator. The virtqueue/buffer frames are allocated once and never freed (M3 item). A
   trait for contiguous/DMA allocation would decouple it.
 
-- **File syscalls are minimal; write is buffered write-back (M6d2; write added M6g3).**
-  `open`/`read`/`write`/`close`/`lseek` exist. `open` reads the **whole file into memory** (no
-  streaming/`mmap`, no large-file support) and honors only `O_RDONLY`/`O_WRONLY`/`O_RDWR`/
-  `O_CREAT`/`O_TRUNC` (no `O_APPEND`/`O_EXCL`/…, `mode` ignored). **Write is write-back**: `write`
-  mutates the in-memory buffer and `close` flushes it via `fs::write_file` — so **a process that
-  exits without `close` loses its writes** (the reaper drops the fd table without flushing; there
-  is no flush-on-exit), and there's no `fsync`. `write` at an offset past EOF zero-fills the gap.
-  Still **no** `unlink`/`stat`/`dup`/`rename`, no directories (root, 8.3 — the M6c/M6g2 FAT
-  limits), and `read` on fd 0 (stdin) isn't a thing. Paths are capped at 256 bytes. Because
-  `OpenFile` is *copied* on `fork` (M6f3), parent and child have independent buffers and offsets
-  (real Unix shares the open-file description / offset) — and two dirty copies both flushing on
-  `close` is last-writer-wins. A real file model (streaming, shared open-file table, flush-on-exit,
-  a proper VFS with mount points/inodes) is later work.
+- **File syscalls are minimal; write is buffered write-back (M6d2; write M6g3; fd model M7g1).**
+  `open`/`read`/`write`/`close`/`lseek`/`dup2` exist. `open` reads the **whole file into memory** (no
+  streaming/`mmap`, no large-file support) and honors `O_RDONLY`/`O_WRONLY`/`O_RDWR`/`O_CREAT`/
+  `O_TRUNC`/`O_APPEND` (no `O_EXCL`/…, `mode` ignored). **Write is write-back**: `write` mutates the
+  in-memory buffer and the buffer is flushed via `fs::write_file` on `close` OR synchronously on a
+  normal `exit` (M7g1 `flush_current_process`). A process killed by a signal/fault loses its
+  unflushed writes (no `fsync`, no journaling). `write` past EOF zero-fills the gap.
+  **`O_APPEND` is open-time only** — the offset is set to EOF at `open`, NOT before each `write`, so
+  it isn't true atomic append (a seek-then-write or a second appender would overwrite); fine for the
+  shell's sequential `cmd >> file`, wrong for general use.
+  **fd backings (M7g1):** fds 0/1/2 are real table entries (`Console`/`Vga`/`Serial`) so they can be
+  redirected via `dup2`; `dup2` **copies** the backing rather than sharing one open-file description
+  (real Unix shares offset/buffer). Same copy semantics on `fork` (M6f3). Consequences: two dirty
+  copies of the same file (via `fork` or `dup2`) each flush independently → **last-writer-wins / lost
+  update**; and `dup2` over a dirty writable `newfd` drops its unflushed buffer silently. The shell
+  redirect flow (open→`dup2`→close, only the child writes) avoids these, but direct `dup2`/`fork`
+  use with writable files hits them. Still **no** `unlink`/`rmdir`/`stat`/`pipe`/`rename`, no LFN
+  (root + 8.3 only), paths capped at 256 bytes. A real file model (streaming, shared open-file
+  table, atomic append, a proper VFS with mounts/inodes) is later work.
 - **Per-process fd table keyed by CR3 (M6d2; leak fixed M6e3).** `syscall::files` stores each
   process's open files in a `BTreeMap` keyed by its PML4 physical address (avoids touching the
   scheduler). Now that frames are recycled (M6e1), the reaper **must** drop the entry on exit

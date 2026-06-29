@@ -23,6 +23,8 @@ pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
 /// `lseek(fd, offset, whence)` — сдвинуть позицию чтения.
 pub const SYS_LSEEK: u64 = 8;
+/// `dup2(oldfd, newfd)` — направить `newfd` на ту же подложку, что и `oldfd` (M7g1; редиректы).
+pub const SYS_DUP2: u64 = 33;
 /// `getpid()` — идентификатор текущего процесса.
 pub const SYS_GETPID: u64 = 39;
 /// `getcwd(buf, size)` — текущий рабочий каталог в буфер пользователя (M7c).
@@ -60,6 +62,8 @@ pub const O_RDWR: u64 = 0o2;
 pub const O_CREAT: u64 = 0o100;
 /// Обрезать файл до нуля при открытии (если уже существует).
 pub const O_TRUNC: u64 = 0o1000;
+/// Дописывать в конец: позиция при открытии — в конце файла (M7g1; для `>>`).
+pub const O_APPEND: u64 = 0o2000;
 
 // --- Номера сигналов (Linux x86-64) ---
 
@@ -86,6 +90,8 @@ pub const EIO: i64 = 5;
 pub const ENOTDIR: i64 = 20;
 /// Является каталогом (нельзя `read`/`write` как файл).
 pub const EISDIR: i64 = 21;
+/// Недопустимый `lseek` (например, по консоли/устройству — оно не позиционируется, M7g1).
+pub const ESPIPE: i64 = 29;
 /// На устройстве не осталось места (нет свободных кластеров/записи каталога).
 pub const ENOSPC: i64 = 28;
 /// Неверный формат исполняемого файла (битый/неподдерживаемый ELF).
