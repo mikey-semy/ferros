@@ -784,6 +784,93 @@ pub fn sys_brk(addr: u64) -> i64 {
     })
 }
 
+/// Размер линуксового `struct stat` (x86-64): 144 байта. Мы заполняем подмножество полей по их
+/// точным смещениям ABI; остальные (uid/gid/времена/rdev/…) оставляем нулями.
+const STAT_SIZE: usize = 144;
+
+/// Собирает линуксовый `struct stat` (x86-64) в 144-байтный буфер по точным смещениям ABI:
+/// `st_ino`@8, `st_nlink`@16, `st_mode`@24, `st_size`@48, `st_blksize`@56, `st_blocks`@64.
+/// `st_blocks` — в единицах по 512 байт (как в Linux). Прочие поля — нули (буфер занулён).
+fn build_stat(mode: u32, ino: u64, nlink: u64, size: u64) -> [u8; STAT_SIZE] {
+    let mut b = [0u8; STAT_SIZE];
+    b[8..16].copy_from_slice(&ino.to_le_bytes()); // st_ino
+    b[16..24].copy_from_slice(&nlink.to_le_bytes()); // st_nlink
+    b[24..28].copy_from_slice(&mode.to_le_bytes()); // st_mode
+    b[48..56].copy_from_slice(&size.to_le_bytes()); // st_size
+    b[56..64].copy_from_slice(&512u64.to_le_bytes()); // st_blksize
+    b[64..72].copy_from_slice(&size.div_ceil(512).to_le_bytes()); // st_blocks (по 512 Б)
+    b
+}
+
+/// `st_mode` (тип + права) для файла/каталога. Права условны (реальных прав у нас нет).
+fn file_mode(is_dir: bool) -> u32 {
+    if is_dir {
+        abi::S_IFDIR | 0o755
+    } else {
+        abi::S_IFREG | 0o644
+    }
+}
+
+/// `stat(path, statbuf)` (M9c): пишет метаданные пути в `struct stat` пользователя. Путь
+/// резолвится от cwd. `st_ino` — первый кластер (псевдо-инод), `st_nlink` — 2 для каталога, иначе 1.
+pub fn sys_stat(path_ptr: u64, statbuf: u64) -> i64 {
+    let resolved = match path_arg(path_ptr) {
+        Ok(p) => p,
+        Err(errno) => return -errno,
+    };
+    match crate::fs::stat(&resolved) {
+        Ok(meta) => {
+            let nlink = if meta.is_dir { 2 } else { 1 };
+            let st = build_stat(
+                file_mode(meta.is_dir),
+                meta.first_cluster as u64,
+                nlink,
+                meta.size as u64,
+            );
+            match uaccess::copy_to_user(statbuf, &st) {
+                Ok(()) => 0,
+                Err(errno) => -errno,
+            }
+        }
+        Err(e) => -fat_errno(e),
+    }
+}
+
+/// `fstat(fd, statbuf)` (M9c): метаданные по дескриптору. Различает подложку fd: файл/каталог →
+/// обычный/каталог (размер — длина буфера в памяти); консоль/serial → символьное устройство
+/// (для `isatty`); концы канала → FIFO. `-EBADF`, если дескриптор закрыт/неизвестен.
+pub fn sys_fstat(fd: u64, statbuf: u64) -> i64 {
+    // Собираем буфер под замком, копируем в пользователя — после (uaccess не держит замок).
+    let st = with_current_fds(|fds| {
+        let backing = fds.get(fd as usize).and_then(|slot| slot.as_ref());
+        match backing {
+            None => None,
+            Some(Fd::Console) | Some(Fd::Vga) | Some(Fd::Serial) => {
+                Some(build_stat(abi::S_IFCHR | 0o620, 0, 1, 0))
+            }
+            Some(Fd::PipeRead(_)) | Some(Fd::PipeWrite(_)) => {
+                Some(build_stat(abi::S_IFIFO | 0o600, 0, 1, 0))
+            }
+            Some(Fd::File(f)) => {
+                let nlink = if f.is_dir { 2 } else { 1 };
+                Some(build_stat(
+                    file_mode(f.is_dir),
+                    0,
+                    nlink,
+                    f.data.len() as u64,
+                ))
+            }
+        }
+    });
+    match st {
+        None => -abi::EBADF,
+        Some(buf) => match uaccess::copy_to_user(statbuf, &buf) {
+            Ok(()) => 0,
+            Err(errno) => -errno,
+        },
+    }
+}
+
 /// Преобразует ошибку FAT в errno для возврата пользователю.
 fn fat_errno(e: crate::fs::fat::FatError) -> i64 {
     use crate::fs::fat::FatError;

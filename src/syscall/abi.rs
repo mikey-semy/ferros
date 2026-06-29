@@ -21,6 +21,12 @@ pub const SYS_WRITE: u64 = 1;
 pub const SYS_OPEN: u64 = 2;
 /// `close(fd)`.
 pub const SYS_CLOSE: u64 = 3;
+/// `stat(path, statbuf)` — метаданные файла по пути в `struct stat` (M9c).
+pub const SYS_STAT: u64 = 4;
+/// `fstat(fd, statbuf)` — метаданные по дескриптору (M9c; для `isatty` и т.п.).
+pub const SYS_FSTAT: u64 = 5;
+/// `lstat(path, statbuf)` — как `stat`, но без следования по симссылкам; у нас их нет → то же (M9c).
+pub const SYS_LSTAT: u64 = 6;
 /// `brk(addr)` — задать конец сегмента данных (кучи) процесса (M9a). `addr == 0` (или ниже базы) —
 /// запрос текущего разрыва. Возвращает НОВЫЙ разрыв при успехе, СТАРЫЙ — при неудаче (как Linux).
 pub const SYS_BRK: u64 = 12;
@@ -59,6 +65,19 @@ pub const SYS_ARCH_PRCTL: u64 = 158;
 pub const SYS_GETDENTS64: u64 = 217;
 /// `exit_group(status)` — завершить все потоки процесса (для нас пока то же, что `exit`).
 pub const SYS_EXIT_GROUP: u64 = 231;
+
+// --- Тип файла в st_mode для stat(2) (Linux, M9c) ---
+
+/// Маска битов типа файла в `st_mode`.
+pub const S_IFMT: u32 = 0o170000;
+/// Обычный файл.
+pub const S_IFREG: u32 = 0o100000;
+/// Каталог.
+pub const S_IFDIR: u32 = 0o040000;
+/// Символьное устройство (наши stdin/stdout/stderr — консоль/serial).
+pub const S_IFCHR: u32 = 0o020000;
+/// FIFO/канал (концы `pipe`).
+pub const S_IFIFO: u32 = 0o010000;
 
 // --- Подкоманды arch_prctl(2) (Linux x86-64, M9b) ---
 
