@@ -70,6 +70,8 @@ pub enum FatError {
     IsADirectory,
     /// Запись с таким именем уже существует (например, `mkdir` существующего каталога).
     AlreadyExists,
+    /// Каталог не пуст (для `rmdir` — в нём есть записи кроме `.`/`..`, M7g3).
+    NotEmpty,
 }
 
 impl From<BlkError> for FatError {
@@ -683,6 +685,108 @@ impl Fat32 {
             let _ = self.free_chain(new_cluster);
             return Err(e);
         }
+        Ok(())
+    }
+
+    /// Местоположение записи `name` в каталоге `dir_cluster` + её разбор (M7g3). Возвращает
+    /// `(сектор, смещение, [`DirEntry`])` или `None`, если записи нет. Нужно для удаления: даёт и
+    /// данные записи (тип/первый кластер), и её адрес на диске (чтобы пометить удалённой).
+    fn locate_entry(
+        &self,
+        dir_cluster: u32,
+        name: &str,
+    ) -> Result<Option<(u32, usize, DirEntry)>, FatError> {
+        let target = short_name_83(name);
+        let mut cluster = dir_cluster;
+        let mut steps_left = self.cluster_count;
+        while self.valid_cluster(cluster) && steps_left > 0 {
+            steps_left -= 1;
+            let first = self.first_sector_of_cluster(cluster);
+            for s in 0..self.sectors_per_cluster {
+                let sector = first + s;
+                let mut buf = [0u8; SECTOR_SIZE];
+                virtio_blk::read_sector(sector as u64, &mut buf)?;
+                for (idx, entry) in buf.chunks_exact(DIR_ENTRY_SIZE).enumerate() {
+                    match entry[0] {
+                        0x00 => return Ok(None), // конец каталога
+                        0xE5 => continue,        // удалённая
+                        _ => {}
+                    }
+                    let attr = entry[11];
+                    if attr & ATTR_LONG_NAME == ATTR_LONG_NAME || attr & ATTR_VOLUME_ID != 0 {
+                        continue;
+                    }
+                    if entry[..11] == target[..] {
+                        let hi = read_u16(entry, 20) as u32;
+                        let lo = read_u16(entry, 26) as u32;
+                        let de = DirEntry {
+                            first_cluster: (hi << 16) | lo,
+                            size: read_u32(entry, 28),
+                            is_dir: attr & ATTR_DIRECTORY != 0,
+                        };
+                        return Ok(Some((sector, idx * DIR_ENTRY_SIZE, de)));
+                    }
+                }
+            }
+            cluster = self.next_cluster(cluster)?;
+        }
+        Ok(None)
+    }
+
+    /// Помечает запись каталога удалённой (первый байт → `0xE5`) — read-modify-write сектора
+    /// (M7g3). Кластеры записи освобождаются отдельно ([`free_chain`]).
+    fn clear_dir_entry(&self, sector: u32, offset: usize) -> Result<(), FatError> {
+        let mut buf = [0u8; SECTOR_SIZE];
+        virtio_blk::read_sector(sector as u64, &mut buf)?;
+        buf[offset] = 0xE5;
+        virtio_blk::write_sector(sector as u64, &buf)?;
+        Ok(())
+    }
+
+    /// Пуст ли каталог `dir_cluster` (только `.`/`..`, M7g3).
+    fn dir_is_empty(&self, dir_cluster: u32) -> Result<bool, FatError> {
+        let items = self.list_dir(dir_cluster)?;
+        Ok(items.iter().all(|it| it.name == "." || it.name == ".."))
+    }
+
+    /// Удаляет файл по пути (M7g3): метит запись каталога удалённой и освобождает её цепочку
+    /// кластеров. `-IsADirectory`, если путь — каталог (для него `rmdir`); `-NotFound`, если нет.
+    ///
+    /// Порядок намеренный: СНАЧАЛА чистим запись, ПОТОМ освобождаем кластеры. При сбое записи между
+    /// шагами это оставит утечку кластеров (запись уже удалена, цепочка ещё «занята» — восстановимо
+    /// fsck'ом), а не кросс-линковку (запись указывала бы на уже свободные кластеры, которые
+    /// аллокатор отдал бы другому файлу). `write_file` коммитит запись последней по той же причине.
+    pub fn unlink(&self, path: &str) -> Result<(), FatError> {
+        let (dir_cluster, name) = self.resolve_parent(path)?;
+        let (sector, offset, de) = self
+            .locate_entry(dir_cluster, name)?
+            .ok_or(FatError::NotFound)?;
+        if de.is_dir {
+            return Err(FatError::IsADirectory);
+        }
+        self.clear_dir_entry(sector, offset)?;
+        if de.first_cluster != 0 {
+            self.free_chain(de.first_cluster)?;
+        }
+        Ok(())
+    }
+
+    /// Удаляет ПУСТОЙ каталог по пути (M7g3): метит запись удалённой и освобождает его кластер.
+    /// `-NotADirectory`, если путь — файл; `-NotEmpty`, если в каталоге есть записи кроме `.`/`..`;
+    /// `-NotFound`, если нет. Порядок (запись → кластеры) — как в [`unlink`](Self::unlink).
+    pub fn rmdir(&self, path: &str) -> Result<(), FatError> {
+        let (dir_cluster, name) = self.resolve_parent(path)?;
+        let (sector, offset, de) = self
+            .locate_entry(dir_cluster, name)?
+            .ok_or(FatError::NotFound)?;
+        if !de.is_dir {
+            return Err(FatError::NotADirectory);
+        }
+        if !self.dir_is_empty(de.first_cluster)? {
+            return Err(FatError::NotEmpty);
+        }
+        self.clear_dir_entry(sector, offset)?;
+        self.free_chain(de.first_cluster)?;
         Ok(())
     }
 }
