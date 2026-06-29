@@ -383,10 +383,14 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   `fxsave` covers x87+SSE but **not AVX/YMM/ZMM** — once a program uses AVX, those upper bits would
   leak (need `xsave` + a larger area); (3) no `#XM`/`#MF` handlers yet (SIMD/x87 exceptions are
   masked by default in MXCSR, so they don't fire for ordinary code).
-- **The bundled libc is minimal (M9h).** `user/c/libc` provides `crt0` + `write`/`read`/`exit`,
-  `malloc`/`free` (a **bump allocator over `brk` — `free` never reclaims**), and
-  `memset`/`memcpy`/`strlen`/`putchar`/`puts`. No `printf`/full stdio, no `errno`, no locale, no
-  threads — it's a foundation to grow (or to replace with a real libc port once buildable).
+- **The bundled libc is minimal (M9h, M9j).** `user/c/libc` provides `crt0` + `write`/`read`/`exit`,
+  `malloc`/`free` (a **bump allocator over `brk` — `free` never reclaims**),
+  `memset`/`memcpy`/`strlen`/`strcmp`/`putchar`/`puts`, and `printf`/`snprintf` (M9j). The `printf`
+  engine handles `%d %i %u %x %X %p %s %c %%` + the `l` length modifier only — **no width/precision/
+  flags (`%-5.2f`), no floating point, no locale** (those are the "genuinely complex" parts that per
+  D13 we grow on demand or take from a real libc). Still no `errno`, no full stdio (`FILE*`,
+  buffering), no threads. It's a foundation to grow, or to replace with a real libc port (relibc)
+  once buildable.
 - **No users/groups; `uname` is fixed strings (M9e).** `getuid`/`geteuid`/`getgid`/`getegid` all
   return 0 — there is no user/group model, no `setuid`/credentials, no permission enforcement
   (every process is effectively root). `getppid` is real (the thread's parent PID). `uname` returns
