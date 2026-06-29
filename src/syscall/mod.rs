@@ -60,6 +60,7 @@ pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
         abi::SYS_OPEN => files::sys_open(args[0], args[1]),
         abi::SYS_READ => files::sys_read(args[0], args[1], args[2]),
         abi::SYS_CLOSE => files::sys_close(args[0]),
+        abi::SYS_BRK => files::sys_brk(args[0]),
         abi::SYS_PIPE => files::sys_pipe(args[0]),
         abi::SYS_DUP2 => files::sys_dup2(args[0], args[1]),
         abi::SYS_GETDENTS64 => files::sys_getdents64(args[0], args[1], args[2]),

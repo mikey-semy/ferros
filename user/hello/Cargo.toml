@@ -112,6 +112,11 @@ path = "src/rm.rs"
 name = "rmdir"
 path = "src/rmdir.rs"
 
+# Проверка brk (M9a): растит/сжимает кучу, пишет/читает её. Встраивается в ядро.
+[[bin]]
+name = "brktest"
+path = "src/brktest.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"

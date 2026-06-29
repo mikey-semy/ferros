@@ -30,8 +30,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::{
     registers::control::Cr3,
     structures::paging::{
-        mapper::TranslateResult, FrameAllocator, Mapper, OffsetPageTable, Page, PageTable,
-        PageTableFlags, PhysFrame, Size4KiB, Translate,
+        mapper::TranslateResult, FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page,
+        PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate,
     },
     PhysAddr, VirtAddr,
 };
@@ -202,4 +202,64 @@ pub fn map_user_page(
     // не создаётся; `page` выбирается из свободной нижней половины адресного пространства.
     let result = unsafe { mapper.map_to(page, frame, flags, frame_allocator) };
     result.expect("map_to (user) failed").flush();
+}
+
+/// Отображает `page` как пользовательскую страницу в **АКТИВНОМ** адресном пространстве (CR3 =
+/// текущий процесс), выделяя фрейм из глобального аллокатора. Для роста кучи (`brk`, M9a):
+/// системный вызов идёт с активным CR3 процесса и `IF=0`, поэтому маппим прямо в активную
+/// таблицу, и другого живого маппера на неё в этот момент нет. В отличие от [`map_user_page`]
+/// НЕ паникует: `false` — нет свободных фреймов или страница уже отображена (вызывающий
+/// трактует как неудачу `brk`). Выданный лист при неудаче `map_to` возвращается в оборот.
+pub fn map_active_user_page(page: Page<Size4KiB>) -> bool {
+    let offset = phys_mem_offset();
+    crate::mm::frame::with_global(|fa| {
+        let Some(frame) = fa.allocate_frame() else {
+            return false;
+        };
+        let flags =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        // SAFETY: оффсет сохранён в `init`; во время syscall (IF=0) активная таблица стабильна и
+        // другого живого `OffsetPageTable` нет — единственная `&mut` на L4 на время вызова.
+        let mut mapper = unsafe { OffsetPageTable::new(active_level_4_table(offset), offset) };
+        // SAFETY: `frame` только что выдан (уникален); `page` — в приватном пользовательском
+        // слоте (куча, slot 255), не пересекается с кодом/стеком ядра.
+        match unsafe { mapper.map_to(page, frame, flags, fa) } {
+            Ok(flush) => {
+                flush.flush();
+                // Обнуляем выданную страницу. Две причины: (1) Linux гарантирует, что свежая
+                // память кучи нулевая (на это рассчитывает malloc/`calloc`); (2) безопасность —
+                // фрейм мог принадлежать завершённому процессу (M6e1 переиспользует фреймы), и без
+                // обнуления кольцо 3 прочитало бы чужие данные. CR3 = это пространство, страница
+                // present+writable+user — ядро может писать по её пользовательскому VA.
+                // SAFETY: страница только что отображена present+writable в активной таблице.
+                unsafe {
+                    core::ptr::write_bytes(page.start_address().as_u64() as *mut u8, 0, 4096)
+                };
+                true
+            }
+            Err(_) => {
+                // Страница уже отображена либо не хватило фрейма под промежуточную таблицу —
+                // возвращаем выданный (но НЕ отображённый) лист, чтобы не течь.
+                // SAFETY: `frame` не попал в таблицы (map_to упал) — больше нигде не используется.
+                unsafe { fa.deallocate_frame(frame) };
+                false
+            }
+        }
+    })
+    .unwrap_or(false)
+}
+
+/// Снимает отображение пользовательской страницы `page` в **АКТИВНОМ** пространстве и возвращает
+/// её физический фрейм аллокатору (M9a, сжатие кучи `brk`). Промежуточные таблицы (L1/L2/L3) не
+/// освобождаются — их вернёт тейкдаун пространства на `exit`. No-op, если страница не отображена.
+pub fn unmap_active_user_page(page: Page<Size4KiB>) {
+    let offset = phys_mem_offset();
+    // SAFETY: как в [`map_active_user_page`] — единственный живой маппер на активную таблицу.
+    let mut mapper = unsafe { OffsetPageTable::new(active_level_4_table(offset), offset) };
+    if let Ok((frame, flush)) = mapper.unmap(page) {
+        flush.flush(); // выкинуть запись из TLB до возврата фрейма
+                       // SAFETY: страница только что снята (PTE убран, TLB сброшен) — фрейм
+                       // больше нигде не используется, можно вернуть в список свободных (M6e1).
+        crate::mm::frame::with_global(|fa| unsafe { fa.deallocate_frame(frame) });
+    }
 }
