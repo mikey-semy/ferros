@@ -375,6 +375,18 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   only the access mode and **can't distinguish `O_WRONLY` from `O_RDWR`** (an open file tracks just a
   `writable` bit, not the full access mode, so a write-only fd reads back as `O_RDWR`); status flags
   aren't reported. Other `fcntl` commands (locks, `F_SETOWN`, …) → `-EINVAL`.
+- **SSE enabled but XMM/FPU state isn't saved on context switch (M9h).** `arch::enable_sse` turns on
+  SSE (CR0/CR4) so clang-vectorized C/libc code runs in ring 3 — but the context switch
+  (`switch_context`) saves only general-purpose callee-saved registers, **not the XMM/MXCSR/x87
+  state**. Single SSE process is safe (the kernel is soft-float and never touches XMM, so a user's
+  XMM survives a round-trip through a kernel thread), but **two SSE-using user processes would leak
+  XMM state between each other**. The fix is `fxsave`/`fxrstor` (or `xsave`) of a per-thread FPU area
+  on switch. Also no `#XM`/`#MF` exception handlers yet (SIMD/x87 exceptions are masked by default in
+  MXCSR, so they don't fire for ordinary code).
+- **The bundled libc is minimal (M9h).** `user/c/libc` provides `crt0` + `write`/`read`/`exit`,
+  `malloc`/`free` (a **bump allocator over `brk` — `free` never reclaims**), and
+  `memset`/`memcpy`/`strlen`/`putchar`/`puts`. No `printf`/full stdio, no `errno`, no locale, no
+  threads — it's a foundation to grow (or to replace with a real libc port once buildable).
 - **No users/groups; `uname` is fixed strings (M9e).** `getuid`/`geteuid`/`getgid`/`getegid` all
   return 0 — there is no user/group model, no `setuid`/credentials, no permission enforcement
   (every process is effectively root). `getppid` is real (the thread's parent PID). `uname` returns

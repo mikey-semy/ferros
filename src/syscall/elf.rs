@@ -80,6 +80,10 @@ pub static IOVECCHECK_ELF: &[u8] = include_bytes!(env!("USER_IOVECCHECK_ELF"));
 /// через `write(1)` и выходит — доказывает, что C-код работает в кольце 3 на ferros.
 pub static HELLO_C_ELF: &[u8] = include_bytes!(env!("USER_HELLO_C_ELF"));
 
+/// Демо минимальной libc (M9h): C-программа со стандартным `int main()`, линкованная с нашим
+/// crt0 + libc; выделяет память через `malloc` (поверх `brk`) и пользуется ей.
+pub static CDEMO_ELF: &[u8] = include_bytes!(env!("USER_CDEMO_ELF"));
+
 /// Встроенный запускатель (M7b): `execve("ARGVECHO", ["ARGVECHO","ping","pong"])` — проверяет
 /// передачу argv через execve. Целевой `ARGVECHO` лежит на диске.
 pub static EXECARGV_ELF: &[u8] = include_bytes!(env!("USER_EXECARGV_ELF"));
