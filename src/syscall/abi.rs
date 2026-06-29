@@ -21,6 +21,9 @@ pub const SYS_WRITE: u64 = 1;
 pub const SYS_OPEN: u64 = 2;
 /// `close(fd)`.
 pub const SYS_CLOSE: u64 = 3;
+/// `brk(addr)` — задать конец сегмента данных (кучи) процесса (M9a). `addr == 0` (или ниже базы) —
+/// запрос текущего разрыва. Возвращает НОВЫЙ разрыв при успехе, СТАРЫЙ — при неудаче (как Linux).
+pub const SYS_BRK: u64 = 12;
 /// `lseek(fd, offset, whence)` — сдвинуть позицию чтения.
 pub const SYS_LSEEK: u64 = 8;
 /// `pipe(fds)` — создать канал: `fds[0]` — конец чтения, `fds[1]` — конец записи (M7g2).

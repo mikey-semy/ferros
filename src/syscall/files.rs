@@ -26,6 +26,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
 use x86_64::instructions::interrupts;
+use x86_64::structures::paging::Page;
+use x86_64::VirtAddr;
 
 /// Верхняя граница числа дескрипторов на процесс.
 const MAX_FDS: usize = 16;
@@ -151,6 +153,11 @@ struct ProcState {
     fds: Vec<Option<Fd>>,
     /// Текущий рабочий каталог — нормализованный абсолютный путь (всегда с ведущим `/`).
     cwd: String,
+    /// Конец кучи процесса — «program break» (M9a). Инвариант: отображены ровно страницы
+    /// `[USER_HEAP_BASE, ⌈brk⌉)`. По умолчанию = `USER_HEAP_BASE` (куча пуста). Наследуется при
+    /// `fork` (вместе со скопированными страницами кучи), СБРАСЫВАЕТСЯ при `execve` (новый образ —
+    /// свежая куча, см. [`rekey_process`]).
+    brk: u64,
 }
 
 impl Default for ProcState {
@@ -158,7 +165,8 @@ impl Default for ProcState {
         ProcState {
             // Стандартные потоки: 0=stdin (консоль), 1=stdout (VGA), 2=stderr (serial).
             fds: alloc::vec![Some(Fd::Console), Some(Fd::Vga), Some(Fd::Serial)],
-            cwd: String::from("/"), // новый процесс стартует в корне
+            cwd: String::from("/"),           // новый процесс стартует в корне
+            brk: crate::arch::USER_HEAP_BASE, // куча пуста: разрыв на базе
         }
     }
 }
@@ -216,7 +224,11 @@ pub fn process_count() -> usize {
 /// меняется.
 pub fn rekey_process(old_cr3: u64, new_cr3: u64) {
     let mut procs = PROCESSES.lock();
-    if let Some(state) = procs.remove(&old_cr3) {
+    if let Some(mut state) = procs.remove(&old_cr3) {
+        // Дескрипторы и cwd переживают exec, а вот КУЧА — нет: у нового образа своё адресное
+        // пространство (страницы старой кучи освобождены вместе со старым), поэтому разрыв
+        // сбрасываем на базу (M9a). Иначе `brk(0)` нового образа вернул бы чужой старый разрыв.
+        state.brk = crate::arch::USER_HEAP_BASE;
         procs.insert(new_cr3, state);
     }
 }
@@ -714,6 +726,62 @@ fn path_arg(path_ptr: u64) -> Result<String, i64> {
         return Err(abi::ENOENT);
     }
     Ok(resolve_path(path))
+}
+
+/// `brk(addr)` (M9a): задаёт конец кучи процесса («program break»). Возвращает НОВЫЙ разрыв при
+/// успехе или ТЕКУЩИЙ при неудаче — это сырая Linux-семантика: libc так и запрашивает разрыв через
+/// `brk(0)` (0 ниже базы → «неудача» → вернётся текущий разрыв).
+///
+/// Куча — приватная область процесса `[USER_HEAP_BASE, USER_HEAP_MAX)`. Мы внутри системного
+/// вызова с активным CR3 процесса и `IF=0`, поэтому рост отображает новые страницы прямо в
+/// активную таблицу, а сжатие снимает их и возвращает фреймы. Инвариант: отображены РОВНО страницы
+/// `[USER_HEAP_BASE, ⌈brk⌉)`, поэтому новые/снимаемые страницы — это `[⌈cur⌉, ⌈addr⌉)`.
+pub fn sys_brk(addr: u64) -> i64 {
+    use crate::arch::{USER_HEAP_BASE, USER_HEAP_MAX};
+    // Округление адреса вверх до границы страницы (4 КиБ).
+    let page_up = |x: u64| (x + 0xFFF) & !0xFFF;
+
+    with_current_proc(|p| {
+        let cur = p.brk;
+        // brk(0) и любой адрес вне [base, max] — запрос/неудача: разрыв не двигаем, отдаём текущий.
+        if !(USER_HEAP_BASE..=USER_HEAP_MAX).contains(&addr) {
+            return cur as i64;
+        }
+        if addr > cur {
+            // Рост: отобразить страницы [⌈cur⌉, ⌈addr⌉) (ниже, [base, ⌈cur⌉), уже отображены).
+            let from = page_up(cur);
+            let to = page_up(addr);
+            let mut va = from;
+            while va < to {
+                if !crate::mm::paging::map_active_user_page(Page::containing_address(
+                    VirtAddr::new(va),
+                )) {
+                    // Нет фреймов: откатываем отображённое В ЭТОМ вызове, оставляем старый разрыв.
+                    let mut back = from;
+                    while back < va {
+                        crate::mm::paging::unmap_active_user_page(Page::containing_address(
+                            VirtAddr::new(back),
+                        ));
+                        back += 4096;
+                    }
+                    return cur as i64;
+                }
+                va += 4096;
+            }
+        } else if addr < cur {
+            // Сжатие: снять страницы [⌈addr⌉, ⌈cur⌉) и вернуть их фреймы аллокатору.
+            let mut va = page_up(addr);
+            let to = page_up(cur);
+            while va < to {
+                crate::mm::paging::unmap_active_user_page(Page::containing_address(VirtAddr::new(
+                    va,
+                )));
+                va += 4096;
+            }
+        }
+        p.brk = addr;
+        addr as i64
+    })
 }
 
 /// Преобразует ошибку FAT в errno для возврата пользователю.

@@ -1,13 +1,16 @@
 # ferros — Roadmap
 
 Each milestone is a complete, observable result ("it now does X") and ends with a
-merged PR. We detail a milestone only when we reach it. Current status: **M7 done**
-(M0–M6 merged). ferros now **boots into an interactive shell**: keyboard input via
-`read(0)`, programs launched with arguments (`fork`/`execve` with argv + `wait4`), a
-per-process working directory (`cd`/`pwd`/relative paths), and `echo`/`cat`/`ls`/`mkdir`
-in `/bin`. The full Unix-process core (PIDs, `fork`/`execve`/`wait4`, basic signals,
-memory reclamation) and a readable-writable hierarchical FAT32 underpin it. **Next: M8
-(networking) or M9 (POSIX/libc)** — plus deferred shell features (redirection/pipes).
+merged PR. We detail a milestone only when we reach it. Current status: **M7 done; M9
+started** (M0–M7 merged). ferros **boots into an interactive shell** with redirection
+(`<`/`>`/`>>`), pipes (`|`), and file management (`echo`/`cat`/`ls`/`mkdir`/`rm`/`rmdir`
+in `/bin`): keyboard input via `read(0)`, programs launched with arguments
+(`fork`/`execve` with argv + `wait4`), a per-process working directory
+(`cd`/`pwd`/relative paths). The full Unix-process core (PIDs, `fork`/`execve`/`wait4`,
+basic signals, memory reclamation) and a readable-writable hierarchical FAT32 underpin it.
+**Now on the libc track (M9), prioritized over M8 networking** per the north star (run
+Linux software → libc first): **M9a — process heap (`brk`) done**; next are the other
+syscalls a libc needs (TLS via `arch_prctl`, `stat`/`fstat`, time).
 
 > **North star (D8):** run the existing **Linux** software ecosystem rather than write a
 > native app ecosystem from scratch. Long-term aim is **ABI-level** compatibility
@@ -75,7 +78,7 @@ memory reclamation) and a readable-writable hierarchical FAT32 underpin it. **Ne
     `close`), **M6g4 — subdirectories + `mkdir`** (done; path resolution, `.`/`..`), **M6g5 —
     directory listing** (done; `getdents64` → `linux_dirent64`, so `ls` works), M6g6 a real VFS
     layer (optional — internal refactor, deferrable until a second filesystem exists).
-- **M7 — init + shell** (in progress). Boot lands in an interactive shell. Decisions: utilities
+- **M7 — init + shell** (done). Boot lands in an interactive shell. Decisions: utilities
   are **external ELF** binaries the shell `fork`+`execve`s (so **argv** is on the early path), and
   **cwd lives in the kernel** (`chdir`/`getcwd`, inherited across fork/exec). Stages:
   - **M7a — stdin / console** (done). Line discipline (line-buffered input, echo, backspace) +
@@ -89,15 +92,29 @@ memory reclamation) and a readable-writable hierarchical FAT32 underpin it. **Ne
     one line per `read(0)` (canonical). Boot lands in an interactive `/$ ` prompt.
   - **M7f — coreutils** (done). `echo`/`cat`/`ls`/`mkdir` as external ELF in `/bin`; the shell
     resolves a bare command name to `/bin/<cmd>` (one-dir PATH). New `mkdir(2)` syscall (the FAT
-    `mkdir` from M6g4 reaches ring 3). Boot has a usable command set. Redirection/pipes
-    (`dup2`/`pipe`) deferred.
+    `mkdir` from M6g4 reaches ring 3). Boot has a usable command set.
+  - **M7g — redirection, pipes, rm/rmdir** (done). **M7g1** generalized the fd table (0/1/2 are
+    real entries) + `dup2` + flush-on-exit → `<`/`>`/`>>`. **M7g2** added `pipe(2)` + blocking
+    pipe fds (ref-counted ends) → `a | b`. **M7g3** added `unlink`/`rmdir` syscalls + FAT delete
+    → `rm`/`rmdir`. The shell is now a usable interactive environment.
 
 ## Tier D — A "real" OS
 
+> **Order:** M9 (libc) is being taken **before** M8 (networking) — the north star is running
+> Linux software, and a libc is the most direct path there. M8 remains queued.
+
+- **M9 — POSIX / libc.** Port a libc (candidate: `relibc`) — enough to build and run real
+  programs. Approached by first filling out the syscalls a libc needs, then the port. Stages:
+  - **M9a — process heap (`brk`)** (done). Per-process `brk`/program break with on-demand page
+    mapping in a private heap region (`USER_HEAP_BASE`), grown/shrunk by mapping/unmapping user
+    pages in the active address space; inherited across `fork` (heap pages copied), reset on
+    `execve`, freed on `exit`. Unblocks `malloc`/`Vec` in ring 3.
+  - **M9b — TLS (`arch_prctl ARCH_SET_FS`)** (next). FS-base for thread-local storage (libc keeps
+    `errno` in TLS).
+  - **M9c — file metadata (`stat`/`fstat`)**, **M9d — time (`clock_gettime`/`gettimeofday`)**,
+    then `writev`/`fcntl`/`uname`/id syscalls — the rest of the libc-facing surface.
 - **M8 — Networking.** NIC driver (virtio-net / e1000), TCP/IP via `smoltcp`,
   ping, sockets.
-- **M9 — POSIX / libc.** Port a libc (candidate: `relibc`) — enough to build and
-  run real programs.
 - **M10 — Graphics / GUI (optional, huge).** Framebuffer, compositor, window
   manager, toolkit.
 - **M11 — Real hardware.** UEFI boot (migrate off bootloader 0.9), drivers for a

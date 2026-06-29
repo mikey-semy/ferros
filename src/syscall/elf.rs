@@ -58,6 +58,9 @@ pub static LSTEST_ELF: &[u8] = include_bytes!(env!("USER_LSTEST_ELF"));
 /// Встроенная проверка stdin (M7a): читает строку через `read(0)` и печатает её обратно.
 pub static STDINTEST_ELF: &[u8] = include_bytes!(env!("USER_STDINTEST_ELF"));
 
+/// Встроенная проверка `brk` (M9a): растит/сжимает кучу процесса, пишет и читает её.
+pub static BRKTEST_ELF: &[u8] = include_bytes!(env!("USER_BRKTEST_ELF"));
+
 /// Встроенный запускатель (M7b): `execve("ARGVECHO", ["ARGVECHO","ping","pong"])` — проверяет
 /// передачу argv через execve. Целевой `ARGVECHO` лежит на диске.
 pub static EXECARGV_ELF: &[u8] = include_bytes!(env!("USER_EXECARGV_ELF"));

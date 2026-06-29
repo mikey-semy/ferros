@@ -20,6 +20,11 @@ pub use self::x86_64::context;
 #[cfg(target_arch = "x86_64")]
 pub use self::x86_64::USER_SPACE_END;
 
+// Арх-нейтральная разметка кучи процесса (M9a): переносимый `brk` ([`crate::syscall::files`])
+// знает базу и предел кучи, но не конкретную раскладку VA.
+#[cfg(target_arch = "x86_64")]
+pub use self::x86_64::{USER_HEAP_BASE, USER_HEAP_MAX};
+
 // Арх-нейтральный доступ к конфигурационному пространству PCI (M6a): переносимый драйвер
 // PCI ([`crate::drivers::pci`]) обходит шину через этот шов, не зная механики портов.
 #[cfg(target_arch = "x86_64")]
