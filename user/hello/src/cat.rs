@@ -53,6 +53,21 @@ fn write_str(s: &[u8]) {
     write_bytes(s.as_ptr(), s.len());
 }
 
+/// Перекачивает всё из дескриптора `fd` в stdout (до конца ввода).
+///
+/// # Safety
+/// `fd` — открытый на чтение дескриптор.
+unsafe fn cat_fd(fd: i64) {
+    let mut buf = [0u8; 512];
+    loop {
+        let n = sc3(SYS_READ, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
+        if n <= 0 {
+            break; // 0 — конец ввода, <0 — ошибка (прекращаем)
+        }
+        write_bytes(buf.as_ptr(), n as usize);
+    }
+}
+
 /// Печатает один файл по пути. Возвращает `true` при успехе.
 ///
 /// # Safety
@@ -63,14 +78,7 @@ unsafe fn cat_file(path: *const u8) -> bool {
         write_str(b"cat: cannot open file\n");
         return false;
     }
-    let mut buf = [0u8; 512];
-    loop {
-        let n = sc3(SYS_READ, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
-        if n <= 0 {
-            break; // 0 — конец файла, <0 — ошибка (прекращаем)
-        }
-        write_bytes(buf.as_ptr(), n as usize);
-    }
+    cat_fd(fd);
     sc3(SYS_CLOSE, fd as u64, 0, 0);
     true
 }
@@ -82,9 +90,10 @@ extern "C" fn argv_main(sp: *const u64) -> ! {
 
     // SAFETY: валидный argv от ядра.
     unsafe {
+        // Без аргументов — читаем stdin (полезно с редиректом `cat < файл`).
         if argc < 2 {
-            write_str(b"usage: cat FILE...\n");
-            sys_exit(1);
+            cat_fd(0);
+            sys_exit(0);
         }
         let mut code = 0u64;
         let mut i = 1;
