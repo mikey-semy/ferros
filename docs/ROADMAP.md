@@ -135,8 +135,10 @@ Linux software → libc first): **M9a–M9f** built the libc-facing syscall surf
   - **M9h — minimal libc** (done). `user/c/libc`: `crt0` (`_start`→`main`+argv→`exit`),
     `malloc`/`free` (bump over `brk`), `mem`/`str`/`puts`. A C program with a standard `int main()` +
     `malloc` runs. Required **enabling SSE** at boot (`arch::enable_sse`) — clang `-O2` vectorizes to
-    SSE, which x86-64 mandates; the kernel stays soft-float. Next: grow the libc (`printf`/stdio),
-    and/or revisit relibc when its build is reachable.
+    SSE, which x86-64 mandates; the kernel stays soft-float.
+  - **M9i — FPU/SSE context save** (done). Now that ring 3 uses SSE, `switch_task` `fxsave`/`fxrstor`s
+    a per-thread FPU area on every switch (inherited on `fork`), so XMM/MXCSR no longer leak between
+    processes. Next: grow the libc (`printf`/stdio), and/or revisit relibc when its build is reachable.
 - **M8 — Networking.** NIC driver (virtio-net / e1000), TCP/IP via `smoltcp`,
   ping, sockets.
 - **M10 — Graphics / GUI (optional, huge).** Framebuffer, compositor, window

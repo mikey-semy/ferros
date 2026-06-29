@@ -157,6 +157,7 @@ fn build_c_programs(manifest: &str) {
 
     for f in [
         c_dir.join("hello.c"),
+        c_dir.join("fputest.c"),
         c_dir.join("demo.c"),
         libc_dir.join("crt0.s"),
         libc_dir.join("libc.c"),
@@ -181,6 +182,11 @@ fn build_c_programs(manifest: &str) {
     let hello_o = clang_compile_c(&c_dir.join("hello.c"), &out_dir.join("hello.o"), &[]);
     let hello_elf = clang_link(&[&hello_o], &out_dir.join("hello_c"), &linker);
     println!("cargo:rustc-env=USER_HELLO_C_ELF={}", hello_elf.display());
+
+    // M9i: свободностоящая `fputest` (fork + проверка xmm0) — для теста сохранения FPU при switch.
+    let fputest_o = clang_compile_c(&c_dir.join("fputest.c"), &out_dir.join("fputest.o"), &[]);
+    let fputest_elf = clang_link(&[&fputest_o], &out_dir.join("fputest"), &linker);
+    println!("cargo:rustc-env=USER_FPUTEST_ELF={}", fputest_elf.display());
 
     // M9h: минимальная libc (crt0 + libc.c) + программа `demo` со стандартным `int main()`.
     let crt0_o = clang_assemble(&libc_dir.join("crt0.s"), &out_dir.join("crt0.o"));
