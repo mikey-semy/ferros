@@ -366,6 +366,17 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   them stay allocated until the address space is torn down on `exit`. Fine for the typical
   grow-mostly malloc pattern; a workload that repeatedly grows and shrinks a large heap would
   accrete page-table frames.
+- **`arch_prctl` is FS-only, no GS, single-thread TLS (M9b).** `ARCH_SET_FS`/`ARCH_GET_FS` work;
+  `ARCH_SET_GS`/`ARCH_GET_GS` return `-EINVAL` (the kernel will want GS for per-CPU once SMP lands,
+  so user GS-base needs care then). There's one thread per process, so "thread-local" is really
+  "process-local" for now; real `pthread`-style multithreading (multiple FS bases within one
+  address space) is later. The FS base is validated to be a canonical user address
+  (`< USER_SPACE_END`) rather than allowing the full non-canonical range Linux's `wrmsr` would
+  `#GP` on.
+- **FS base is reloaded on every context switch (M9b, perf).** `switch_task` writes `IA32_FS_BASE`
+  unconditionally (including 0 for kernel threads), so every switch pays a `wrmsr` (~tens–hundreds
+  of cycles) even when the base is unchanged. Cache the live base (or skip kernel→kernel switches)
+  to write only on change. Correctness-first for now.
 - **Only the `brk` path zeroes user pages; ELF/stack mapping does not (M9a).** `brk` growth zeroes
   every page it hands out (`map_active_user_page`), matching Linux and closing the cross-process
   info leak from frame reuse (M6e1). But `map_user_page` (ELF segments, the user stack) still does

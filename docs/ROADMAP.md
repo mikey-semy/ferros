@@ -9,8 +9,8 @@ in `/bin`): keyboard input via `read(0)`, programs launched with arguments
 (`cd`/`pwd`/relative paths). The full Unix-process core (PIDs, `fork`/`execve`/`wait4`,
 basic signals, memory reclamation) and a readable-writable hierarchical FAT32 underpin it.
 **Now on the libc track (M9), prioritized over M8 networking** per the north star (run
-Linux software → libc first): **M9a — process heap (`brk`) done**; next are the other
-syscalls a libc needs (TLS via `arch_prctl`, `stat`/`fstat`, time).
+Linux software → libc first): **M9a — process heap (`brk`)** and **M9b — TLS (`arch_prctl`)
+done**; next are the remaining libc-facing syscalls (`stat`/`fstat`, time, `writev`/`fcntl`).
 
 > **North star (D8):** run the existing **Linux** software ecosystem rather than write a
 > native app ecosystem from scratch. Long-term aim is **ABI-level** compatibility
@@ -109,8 +109,10 @@ syscalls a libc needs (TLS via `arch_prctl`, `stat`/`fstat`, time).
     mapping in a private heap region (`USER_HEAP_BASE`), grown/shrunk by mapping/unmapping user
     pages in the active address space; inherited across `fork` (heap pages copied), reset on
     `execve`, freed on `exit`. Unblocks `malloc`/`Vec` in ring 3.
-  - **M9b — TLS (`arch_prctl ARCH_SET_FS`)** (next). FS-base for thread-local storage (libc keeps
-    `errno` in TLS).
+  - **M9b — TLS (`arch_prctl ARCH_SET_FS`)** (done). Per-thread FS-segment base for thread-local
+    storage (libc keeps `errno` in TLS). `arch_prctl(158)` SET_FS/GET_FS writes `IA32_FS_BASE`;
+    the base is stored per-thread and **restored on every context switch** (else TLS would leak
+    between processes), inherited on `fork`, reset on `execve`.
   - **M9c — file metadata (`stat`/`fstat`)**, **M9d — time (`clock_gettime`/`gettimeofday`)**,
     then `writev`/`fcntl`/`uname`/id syscalls — the rest of the libc-facing surface.
 - **M8 — Networking.** NIC driver (virtio-net / e1000), TCP/IP via `smoltcp`,

@@ -35,7 +35,7 @@ use crate::mm::addr_space::AddressSpace;
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::instructions::interrupts;
 use x86_64::registers::control::Cr3;
-use x86_64::registers::model_specific::{Efer, EferFlags, LStar, SFMask, Star};
+use x86_64::registers::model_specific::{Efer, EferFlags, FsBase, LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
 use x86_64::structures::paging::{FrameAllocator, Page, Size4KiB};
 use x86_64::VirtAddr;
@@ -160,8 +160,44 @@ extern "C" fn ferros_syscall_dispatch(regs: *mut SyscallRegs) {
         fork(regs);
         return;
     }
+    // arch_prctl настраивает базу сегмента FS (TLS) — чисто арх-специфика (MSR), поэтому
+    // обрабатываем здесь, а не в переносимом диспетчере (M9b). Возвращает обычный i64 в rax.
+    if regs.rax == crate::syscall::abi::SYS_ARCH_PRCTL {
+        regs.rax = sys_arch_prctl(regs.rdi, regs.rsi) as u64;
+        return;
+    }
     let args = [regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9];
     regs.rax = crate::syscall::dispatch(regs.rax, args, regs.user_rsp) as u64;
+}
+
+/// `arch_prctl(code, addr)` (M9b): арх-специфичные настройки потока. Реализована база TLS через
+/// сегмент FS — `ARCH_SET_FS` (`addr` = указатель блока TLS) и `ARCH_GET_FS` (записать базу в
+/// `*addr`). Прочее (`ARCH_SET_GS`/`ARCH_GET_GS`) пока `-EINVAL`.
+///
+/// `ARCH_SET_FS` пишет базу и в MSR `IA32_FS_BASE` (живое значение для текущего исполнения), и в
+/// поток (планировщик восстановит её при следующем переключении сюда). Адрес обязан быть
+/// каноничным пользовательским (`< USER_SPACE_END`) — иначе `-EINVAL` (а заодно `VirtAddr::new`
+/// не паникует на неканоничном адресе).
+fn sys_arch_prctl(code: u64, addr: u64) -> i64 {
+    use crate::syscall::abi;
+    match code {
+        abi::ARCH_SET_FS => {
+            if addr >= crate::arch::USER_SPACE_END {
+                return -abi::EINVAL;
+            }
+            crate::sched::thread::set_current_fs_base(addr);
+            FsBase::write(VirtAddr::new(addr));
+            0
+        }
+        abi::ARCH_GET_FS => {
+            let base = crate::sched::thread::current_fs_base();
+            match crate::syscall::uaccess::copy_to_user(addr, &base.to_ne_bytes()) {
+                Ok(()) => 0,
+                Err(errno) => -errno,
+            }
+        }
+        _ => -abi::EINVAL,
+    }
 }
 
 /// `execve(path, argv, envp)` (M6f2): заменяет образ текущего процесса программой, прочитанной
@@ -287,6 +323,9 @@ fn exec(regs: &mut SyscallRegs, path_ptr: u64) {
         old_pml4.start_address().as_u64(),
         new_pml4.start_address().as_u64(),
     );
+    // Сбрасываем живую базу TLS в 0 (M9b): новый образ стартует с чистым FS (как в Linux) и
+    // настроит свой TLS через `arch_prctl`. Сохранённое значение потока обнулил `exec_replace_cr3`.
+    FsBase::write(VirtAddr::new(0));
 
     // 5) Переписываем сохранённое состояние пользователя: чистый старт новой программы.
     //    `user_rsp` указывает на `argc` построенного начального стека (System V ABI); регистры
@@ -354,8 +393,16 @@ fn fork(regs: &mut SyscallRegs) {
     // тельской — те же VA, своё содержимое).
     let rsp = unsafe { init_fork_child_stack(ktop as *mut u8, regs) };
 
-    // 4) Регистрируем ребёнка (parent = текущий PID) и возвращаем его PID родителю.
-    let child_pid = crate::sched::thread::add_user_task(rsp, child_pml4, ktop as u64, kstack);
+    // 4) Регистрируем ребёнка (parent = текущий PID) и возвращаем его PID родителю. Ребёнок
+    //    наследует базу TLS родителя (M9b): его страницы TLS скопированы вместе с АП (fork_from),
+    //    поэтому тот же FS-указатель в копии корректен.
+    let child_pid = crate::sched::thread::add_user_task(
+        rsp,
+        child_pml4,
+        ktop as u64,
+        kstack,
+        crate::sched::thread::current_fs_base(),
+    );
     regs.rax = child_pid as u64;
 }
 
@@ -554,7 +601,8 @@ pub unsafe fn spawn_user(
         )
     };
 
-    crate::sched::thread::add_user_task(rsp, aspace.pml4_frame(), ktop as u64, kstack);
+    // Новый процесс стартует без TLS (fs_base = 0): свою базу он настроит через `arch_prctl` (M9b).
+    crate::sched::thread::add_user_task(rsp, aspace.pml4_frame(), ktop as u64, kstack, 0);
 }
 
 /// Верхняя граница числа элементов `argv`/`envp`, читаемых из памяти пользователя (M7b) —
