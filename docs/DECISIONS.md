@@ -137,3 +137,17 @@ hand-rolled (read-only, 8.3 names), but the test **image** is created with the `
 as a **`[build-dependencies]`** entry — a host-only tool in `build.rs` that formats the image
 and writes a test file. `fatfs` is therefore *not* a kernel/runtime dependency: we only use a
 trusted tool to produce a fixture, while still learning to *read* FAT by hand.
+
+## D12 — Tier D order: M9 (libc) before M8 (networking)
+
+**Decision:** Take **M9 (POSIX/libc) before M8 (networking)**, reversing the roadmap's
+numeric order. Approach M9 incrementally: first **fill out the syscalls a libc needs**
+(M9a `brk` → M9b TLS/`arch_prctl` → `stat`/`fstat`, time, `writev`/`fcntl`, …), then port a
+libc (candidate: `relibc`). M8 stays queued.
+**Why:** the north star (D8) is running the existing **Linux** software ecosystem, and a libc
+is the most direct path there — it's what lets real programs build and run, and it exercises
+the syscall ABI we've been copying from Linux since M5. Networking is valuable but orthogonal
+to that core goal and can follow. Doing the libc-facing syscalls first (rather than diving
+straight at a relibc port) keeps each step a small, observable, independently-testable PR —
+e.g. M9a `brk` lands a working process heap (malloc's foundation) provable from ring 3 on its
+own, long before any libc is in the tree.

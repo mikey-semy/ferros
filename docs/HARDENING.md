@@ -350,6 +350,29 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   (`kill(pid <= 0)` is `-ESRCH`), and `SIGSTOP`/job-control stop actions are unimplemented
   (treated as no-op rather than stopping the process).
 
+## M9 — POSIX / libc
+
+- **`brk` heap is a fixed region, no `mmap` (M9a).** The process heap is a fixed window
+  `[USER_HEAP_BASE, USER_HEAP_MAX)` (1 GiB) that grows up by mapping pages on demand. There is
+  **no `mmap`/`munmap`** (anonymous or file-backed), so large/aligned allocations and
+  memory-mapped files aren't possible yet — a real `malloc` arena beyond 1 GiB, or one that
+  prefers `mmap`, would hit the wall. The heap also can't grow *toward* the stack; it's one
+  bounded slab.
+- **No heap guard page (M9a).** Nothing unmapped sits between the heap top and higher addresses,
+  so a ring-3 overrun past `brk` just faults if unmapped or silently runs into the next mapping if
+  something is ever placed above. Add a guard page when the user VA layout grows.
+- **`brk` shrink frees leaf frames but leaks intermediate tables (M9a).** Lowering the break
+  unmaps pages and returns their frames to the allocator, but the L1/L2/L3 page tables that held
+  them stay allocated until the address space is torn down on `exit`. Fine for the typical
+  grow-mostly malloc pattern; a workload that repeatedly grows and shrinks a large heap would
+  accrete page-table frames.
+- **Only the `brk` path zeroes user pages; ELF/stack mapping does not (M9a).** `brk` growth zeroes
+  every page it hands out (`map_active_user_page`), matching Linux and closing the cross-process
+  info leak from frame reuse (M6e1). But `map_user_page` (ELF segments, the user stack) still does
+  **not** zero its frames — BSS and fresh stack pages rely on frames happening to be zero, which a
+  recycled frame isn't. That's a pre-existing correctness+security gap (stale bytes in BSS/stack);
+  zeroing should move into the shared user-page mapping path kernel-wide.
+
 ## Cross-cutting (whole kernel)
 
 - **No real-hardware validation** — QEMU only until M11 (UEFI + real drivers).
