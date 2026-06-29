@@ -296,6 +296,17 @@ pub fn current_pid() -> u32 {
     })
 }
 
+/// PID родителя текущего процесса (для `getppid`, M9e). 0 — создан ядром на старте или осиротел
+/// (родитель завершился — `terminate` переусыновляет детей PID 0).
+pub fn current_ppid() -> u32 {
+    interrupts::without_interrupts(|| {
+        SCHEDULER
+            .lock()
+            .as_ref()
+            .map_or(0, |s| s.threads[s.current].parent)
+    })
+}
+
 /// Добавляет поток в планировщик (с выключенными прерываниями — тот же замок берёт таймер).
 fn push_thread(thread: Thread) {
     interrupts::without_interrupts(|| {

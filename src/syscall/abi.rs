@@ -60,6 +60,18 @@ pub const SYS_WAIT4: u64 = 61;
 pub const SYS_KILL: u64 = 62;
 /// `gettimeofday(tv, tz)` — текущее время в `struct timeval` (сек+мкс), `tz` игнорируем (M9d).
 pub const SYS_GETTIMEOFDAY: u64 = 96;
+/// `uname(buf)` — информация о системе в `struct utsname` (M9e).
+pub const SYS_UNAME: u64 = 63;
+/// `getuid()` — реальный UID (у нас всегда 0, root) (M9e).
+pub const SYS_GETUID: u64 = 102;
+/// `getgid()` — реальный GID (0) (M9e).
+pub const SYS_GETGID: u64 = 104;
+/// `geteuid()` — эффективный UID (0) (M9e).
+pub const SYS_GETEUID: u64 = 107;
+/// `getegid()` — эффективный GID (0) (M9e).
+pub const SYS_GETEGID: u64 = 108;
+/// `getppid()` — PID родителя (M9e).
+pub const SYS_GETPPID: u64 = 110;
 /// `arch_prctl(code, addr)` — арх-специфичные настройки потока (M9b): у нас — база сегмента FS
 /// под TLS (`ARCH_SET_FS`/`ARCH_GET_FS`). libc держит `errno` и thread-local в TLS через FS.
 pub const SYS_ARCH_PRCTL: u64 = 158;

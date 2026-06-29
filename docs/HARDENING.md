@@ -366,6 +366,12 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   them stay allocated until the address space is torn down on `exit`. Fine for the typical
   grow-mostly malloc pattern; a workload that repeatedly grows and shrinks a large heap would
   accrete page-table frames.
+- **No users/groups; `uname` is fixed strings (M9e).** `getuid`/`geteuid`/`getgid`/`getegid` all
+  return 0 — there is no user/group model, no `setuid`/credentials, no permission enforcement
+  (every process is effectively root). `getppid` is real (the thread's parent PID). `uname` returns
+  hard-coded fields (`sysname`=ferros, `nodename`=ferros, `machine`=x86_64, …) — no real hostname
+  (`sethostname`/`gethostname`) or domain. Fine for single-user bring-up; a real multi-user model is
+  far-future.
 - **Time is uptime, not wall-clock; tick-coarse (M9d).** `clock_gettime`/`gettimeofday`/`time`
   derive from the PIT tick counter (uptime since boot), so **`CLOCK_REALTIME` is not real wall-clock
   time** — it starts at 0 at boot, not the Unix epoch (there's no RTC read yet; reading the CMOS RTC
