@@ -127,6 +127,11 @@ path = "src/tlstest.rs"
 name = "stattest"
 path = "src/stattest.rs"
 
+# Проверка времени (M9d): clock_gettime/gettimeofday/time. Встраивается в ядро.
+[[bin]]
+name = "timetest"
+path = "src/timetest.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"

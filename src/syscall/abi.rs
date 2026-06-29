@@ -58,13 +58,26 @@ pub const SYS_EXIT: u64 = 60;
 pub const SYS_WAIT4: u64 = 61;
 /// `kill(pid, sig)` — послать сигнал процессу (2a5, зарезервировано).
 pub const SYS_KILL: u64 = 62;
+/// `gettimeofday(tv, tz)` — текущее время в `struct timeval` (сек+мкс), `tz` игнорируем (M9d).
+pub const SYS_GETTIMEOFDAY: u64 = 96;
 /// `arch_prctl(code, addr)` — арх-специфичные настройки потока (M9b): у нас — база сегмента FS
 /// под TLS (`ARCH_SET_FS`/`ARCH_GET_FS`). libc держит `errno` и thread-local в TLS через FS.
 pub const SYS_ARCH_PRCTL: u64 = 158;
+/// `time(tloc)` — секунды текущего времени (возврат + запись в `*tloc`, если не NULL) (M9d).
+pub const SYS_TIME: u64 = 201;
 /// `getdents64(fd, buf, count)` — прочитать записи каталога (для `ls`).
 pub const SYS_GETDENTS64: u64 = 217;
+/// `clock_gettime(clk_id, tp)` — время часов `clk_id` в `struct timespec` (сек+нс) (M9d).
+pub const SYS_CLOCK_GETTIME: u64 = 228;
 /// `exit_group(status)` — завершить все потоки процесса (для нас пока то же, что `exit`).
 pub const SYS_EXIT_GROUP: u64 = 231;
+
+// --- Идентификаторы часов для clock_gettime(2) (Linux, M9d) ---
+
+/// Стенные часы (у нас без RTC = uptime от загрузки).
+pub const CLOCK_REALTIME: u64 = 0;
+/// Монотонные часы (не идут назад). У нас тот же uptime.
+pub const CLOCK_MONOTONIC: u64 = 1;
 
 // --- Тип файла в st_mode для stat(2) (Linux, M9c) ---
 
