@@ -23,6 +23,8 @@ pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
 /// `lseek(fd, offset, whence)` — сдвинуть позицию чтения.
 pub const SYS_LSEEK: u64 = 8;
+/// `pipe(fds)` — создать канал: `fds[0]` — конец чтения, `fds[1]` — конец записи (M7g2).
+pub const SYS_PIPE: u64 = 22;
 /// `dup2(oldfd, newfd)` — направить `newfd` на ту же подложку, что и `oldfd` (M7g1; редиректы).
 pub const SYS_DUP2: u64 = 33;
 /// `getpid()` — идентификатор текущего процесса.
@@ -92,6 +94,8 @@ pub const ENOTDIR: i64 = 20;
 pub const EISDIR: i64 = 21;
 /// Недопустимый `lseek` (например, по консоли/устройству — оно не позиционируется, M7g1).
 pub const ESPIPE: i64 = 29;
+/// Запись в канал, у которого не осталось читателей (M7g2; вместо SIGPIPE).
+pub const EPIPE: i64 = 32;
 /// На устройстве не осталось места (нет свободных кластеров/записи каталога).
 pub const ENOSPC: i64 = 28;
 /// Неверный формат исполняемого файла (битый/неподдерживаемый ELF).

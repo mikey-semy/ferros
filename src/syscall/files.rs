@@ -20,8 +20,9 @@
 
 use super::{abi, uaccess};
 use crate::drivers::{serial, vga};
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
 use x86_64::instructions::interrupts;
@@ -67,6 +68,77 @@ enum Fd {
     Serial,
     /// Обычный файл или каталог на диске.
     File(OpenFile),
+    /// Конец чтения канала (M7g2).
+    PipeRead(PipeRead),
+    /// Конец записи канала (M7g2).
+    PipeWrite(PipeWrite),
+}
+
+/// Разделяемый буфер канала (M7g2): байты в пути + число живых концов чтения/записи. Счётчики
+/// ведут сами концы через `Clone`/`Drop`, поэтому fork/dup2/close/exit/kill учитываются
+/// автоматически (любой способ исчезновения конца уменьшает счётчик). Буфер неограничен (запись
+/// не блокируется — для shell-пайпов с небольшими данными достаточно; см. HARDENING).
+struct PipeBuf {
+    data: VecDeque<u8>,
+    readers: usize,
+    writers: usize,
+}
+
+/// Конец **чтения** канала. `Clone` (fork/dup2) увеличивает счётчик читателей, `Drop`
+/// (close/exit/kill) уменьшает; когда читателей не осталось — будит заблокированных писателей
+/// (им пора `-EPIPE`). Доступ к буферу — всегда под `without_interrupts` (как у консоли/планировщика).
+struct PipeRead {
+    buf: Arc<Mutex<PipeBuf>>,
+}
+
+impl Clone for PipeRead {
+    fn clone(&self) -> Self {
+        interrupts::without_interrupts(|| self.buf.lock().readers += 1);
+        PipeRead {
+            buf: self.buf.clone(),
+        }
+    }
+}
+
+impl Drop for PipeRead {
+    fn drop(&mut self) {
+        let gone = interrupts::without_interrupts(|| {
+            let mut b = self.buf.lock();
+            b.readers -= 1;
+            b.readers == 0
+        });
+        if gone {
+            crate::sched::thread::wake_pipe_waiters(); // писатели → `-EPIPE`
+        }
+    }
+}
+
+/// Конец **записи** канала. Симметрично: `Clone` ++writers, `Drop` --writers; когда писателей не
+/// осталось — будит заблокированных читателей (им пора видеть EOF).
+struct PipeWrite {
+    buf: Arc<Mutex<PipeBuf>>,
+}
+
+impl Clone for PipeWrite {
+    fn clone(&self) -> Self {
+        interrupts::without_interrupts(|| self.buf.lock().writers += 1);
+        PipeWrite {
+            buf: self.buf.clone(),
+        }
+    }
+}
+
+impl Drop for PipeWrite {
+    fn drop(&mut self) {
+        let gone = interrupts::without_interrupts(|| {
+            let mut b = self.buf.lock();
+            b.writers -= 1;
+            b.writers == 0
+        });
+        if gone {
+            crate::sched::thread::wake_pipe_waiters(); // читатели → EOF
+        }
+    }
 }
 
 /// Состояние процесса в файловом слое: таблица дескрипторов и текущий рабочий каталог (M7c).
@@ -96,39 +168,41 @@ static PROCESSES: Mutex<BTreeMap<u64, ProcState>> = Mutex::new(BTreeMap::new());
 
 /// Забывает таблицу дескрипторов завершённого процесса (по физ. адресу его PML4). Зовёт
 /// reaper (M6e3) при освобождении процесса. Это **корректность**: фрейм PML4 переиспользуется
-/// (M6e1), и новый процесс не должен унаследовать чужие fd. Грязные файлы к этому моменту уже
-/// сброшены — нормальный `exit` делает это синхронно ([`flush_current_process`]).
+/// (M6e1), и новый процесс не должен унаследовать чужие fd. У нормально завершённого процесса
+/// дескрипторы уже закрыты ([`release_current_process_fds`] на `exit`); здесь освобождаются
+/// дескрипторы убитых сигналом/сбоем процессов (их `Drop` отпустит и концы каналов).
 pub fn forget_process(cr3_phys: u64) {
     PROCESSES.lock().remove(&cr3_phys);
 }
 
-/// Сбрасывает на диск незакрытые грязные файлы ТЕКУЩЕГО процесса — зовётся из обработчика `exit`
-/// ДО завершения (M7g1). Нужно, чтобы перенаправленный вывод (`> файл`, который программа не
-/// закрывает) был **durable к моменту, когда родитель вернётся из `wait`** — иначе следующая
-/// команда (`cat файл`) могла бы прочитать ещё не сброшенный файл. Делается синхронно на ядровом
-/// стеке процесса (как `close`), а не лениво в reaper'е. Грязное снимаем под замком, пишем — без
-/// него; `dirty` гасим, чтобы не сбросить повторно. Сбой записи игнорируем — процесс завершается.
-pub fn flush_current_process() {
+/// Закрывает все дескрипторы ТЕКУЩЕГО процесса — зовётся из обработчика `exit` ДО завершения
+/// (M7g1; концы каналов — M7g2). Делает это **синхронно** на ядровом стеке процесса (как `close`),
+/// а не лениво в reaper'е, по двум причинам:
+/// - грязные файлы (`> файл`, который программа не закрывает) должны быть **durable к моменту,
+///   когда родитель вернётся из `wait`** — иначе следующая команда (`cat файл`) прочла бы
+///   несброшенный файл;
+/// - концы каналов должны освободиться сразу (`Drop` уменьшит счётчик и разбудит другой конец) —
+///   иначе читатель на другом конце `cmd1 | cmd2` не увидел бы EOF, пока reaper не дойдёт до нас.
+///
+/// Забираем всю таблицу под замком, обрабатываем — без него (диск + `Drop` концов канала берут
+/// другие замки). Сбой записи игнорируем: процесс уже завершается.
+pub fn release_current_process_fds() {
     let key = current_key();
-    let dirty: Vec<(String, Vec<u8>)> = {
+    let fds = {
         let mut procs = PROCESSES.lock();
         match procs.get_mut(&key) {
-            Some(state) => state
-                .fds
-                .iter_mut()
-                .filter_map(|slot| match slot {
-                    Some(Fd::File(f)) if f.writable && f.dirty => {
-                        f.dirty = false;
-                        Some((f.name.clone(), f.data.clone()))
-                    }
-                    _ => None,
-                })
-                .collect(),
+            Some(state) => core::mem::take(&mut state.fds),
             None => Vec::new(),
         }
     };
-    for (name, data) in dirty {
-        let _ = crate::fs::write_file(&name, &data);
+    for fd in fds {
+        if let Some(Fd::File(f)) = &fd {
+            if f.writable && f.dirty {
+                let _ = crate::fs::write_file(&f.name, &f.data);
+            }
+        }
+        // `fd` дропается здесь: для `PipeRead`/`PipeWrite` это уменьшит счётчик и разбудит
+        // заблокированный другой конец.
     }
 }
 
@@ -443,6 +517,7 @@ pub fn sys_write(fd: u64, buf: u64, count: u64, user_rsp: u64) -> i64 {
     enum Kind {
         Vga,
         Serial,
+        Pipe,
         File,
         NotWritable,
         Bad,
@@ -450,14 +525,16 @@ pub fn sys_write(fd: u64, buf: u64, count: u64, user_rsp: u64) -> i64 {
     let kind = with_current_fds(|fds| match fds.get(fd).and_then(|s| s.as_ref()) {
         Some(Fd::Vga) => Kind::Vga,
         Some(Fd::Serial) => Kind::Serial,
+        Some(Fd::PipeWrite(_)) => Kind::Pipe,
         Some(Fd::File(f)) if f.writable && !f.is_dir => Kind::File,
-        Some(_) => Kind::NotWritable, // консоль (read-only), файл без записи, каталог
+        Some(_) => Kind::NotWritable, // консоль/PipeRead (read-only), файл без записи, каталог
         None => Kind::Bad,
     });
     match kind {
         Kind::Bad | Kind::NotWritable => -abi::EBADF,
         Kind::Vga => write_device(fd as u64, buf, count, user_rsp, vga::write_bytes),
         Kind::Serial => write_device(fd as u64, buf, count, user_rsp, serial::write_bytes),
+        Kind::Pipe => write_pipe(fd, buf, count),
         Kind::File => with_current_fds(|fds| {
             let Some(Fd::File(file)) = fds.get_mut(fd).and_then(|s| s.as_mut()) else {
                 return -abi::EBADF; // не должно меняться при IF=0, но перепроверяем
@@ -502,18 +579,21 @@ pub fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
     // `PROCESSES` нельзя (оно уступает CPU).
     enum Kind {
         Console,
+        Pipe,
         File,
         NotReadable,
         Bad,
     }
     let kind = with_current_fds(|fds| match fds.get(fd).and_then(|s| s.as_ref()) {
         Some(Fd::Console) => Kind::Console,
+        Some(Fd::PipeRead(_)) => Kind::Pipe,
         Some(Fd::File(_)) => Kind::File,
-        Some(_) => Kind::NotReadable, // Vga/Serial — только запись
+        Some(_) => Kind::NotReadable, // Vga/Serial/PipeWrite — только запись
         None => Kind::Bad,
     });
     match kind {
         Kind::Console => read_stdin(buf, count),
+        Kind::Pipe => read_pipe(fd, buf, count),
         Kind::Bad | Kind::NotReadable => -abi::EBADF,
         Kind::File => {
             let count = count as usize;
@@ -665,6 +745,134 @@ pub fn sys_dup2(oldfd: u64, newfd: u64) -> i64 {
         fds[newfd] = dup;
         newfd as i64
     })
+}
+
+/// `pipe(fds)` (M7g2): создаёт канал и выдаёт два дескриптора — `fds[0]` конец чтения, `fds[1]`
+/// конец записи (как в Linux). Концы делят один буфер; данные из `write(fds[1])` читаются из
+/// `read(fds[0])`. Возвращает 0 или `-errno` (`-EMFILE`, если таблица полна; `-EFAULT` на плохом
+/// `fds`).
+pub fn sys_pipe(fds_ptr: u64) -> i64 {
+    let buf = Arc::new(Mutex::new(PipeBuf {
+        data: VecDeque::new(),
+        readers: 1, // конец чтения, который кладём в таблицу
+        writers: 1, // конец записи
+    }));
+    let read_end = Fd::PipeRead(PipeRead { buf: buf.clone() });
+    let write_end = Fd::PipeWrite(PipeWrite { buf });
+
+    // Выделяем оба дескриптора. При неудаче выделенный откатываем (его `Drop` вернёт счётчик).
+    let (rfd, wfd) = with_current_proc(|p| {
+        let r = alloc_fd(&mut p.fds, read_end);
+        if r < 0 {
+            return (r, r); // read_end не сохранён alloc_fd'ом → его Drop уже уменьшил readers
+        }
+        let w = alloc_fd(&mut p.fds, write_end);
+        if w < 0 {
+            p.fds[r as usize] = None; // дропаем сохранённый конец чтения
+            return (w, w);
+        }
+        (r, w)
+    });
+    if rfd < 0 {
+        return rfd;
+    }
+    if wfd < 0 {
+        return wfd;
+    }
+
+    // Пишем пару i32 [rfd, wfd] в массив пользователя.
+    let mut out = [0u8; 8];
+    out[0..4].copy_from_slice(&(rfd as i32).to_le_bytes());
+    out[4..8].copy_from_slice(&(wfd as i32).to_le_bytes());
+    match uaccess::copy_to_user(fds_ptr, &out) {
+        Ok(()) => 0,
+        Err(errno) => -errno, // дескрипторы остаются открытыми — мелкая утечка при EFAULT
+    }
+}
+
+/// `read` с конца чтения канала (M7g2): отдаёт данные из буфера; если пусто и писатели ещё есть —
+/// **блокирует** до записи/закрытия; если пусто и писателей нет — EOF (0). Замок буфера не держим
+/// через блокировку (как у stdin), поэтому writer всегда может его взять.
+fn read_pipe(fd: usize, buf: u64, count: u64) -> i64 {
+    // Клонируем Arc буфера (не сам конец — счётчик читателей не трогаем): он живёт независимо от
+    // таблицы fd на время чтения.
+    let pipe = with_current_fds(|fds| match fds.get(fd).and_then(|s| s.as_ref()) {
+        Some(Fd::PipeRead(p)) => Some(p.buf.clone()),
+        _ => None,
+    });
+    let pipe = match pipe {
+        Some(p) => p,
+        None => return -abi::EBADF,
+    };
+    if count == 0 {
+        return 0;
+    }
+    let count = count as usize;
+    enum Out {
+        Data(Vec<u8>),
+        Eof,
+        Retry,
+    }
+    loop {
+        let out = interrupts::without_interrupts(|| {
+            let mut b = pipe.lock();
+            if !b.data.is_empty() {
+                let n = count.min(b.data.len());
+                Out::Data(b.data.drain(..n).collect())
+            } else if b.writers == 0 {
+                Out::Eof
+            } else {
+                drop(b); // отпускаем замок буфера ДО блокировки (writer должен мочь его взять)
+                crate::sched::thread::block_current_on_pipe();
+                Out::Retry
+            }
+        });
+        match out {
+            Out::Data(d) => {
+                return match uaccess::copy_to_user(buf, &d) {
+                    Ok(()) => d.len() as i64,
+                    Err(errno) => -errno,
+                }
+            }
+            Out::Eof => return 0,
+            Out::Retry => {}
+        }
+    }
+}
+
+/// `write` в конец записи канала (M7g2): дописывает байты в буфер и будит читателей. Буфер
+/// неограничен — запись не блокируется. `-EPIPE`, если читателей не осталось (вместо SIGPIPE).
+fn write_pipe(fd: usize, buf: u64, count: u64) -> i64 {
+    let pipe = with_current_fds(|fds| match fds.get(fd).and_then(|s| s.as_ref()) {
+        Some(Fd::PipeWrite(p)) => Some(p.buf.clone()),
+        _ => None,
+    });
+    let pipe = match pipe {
+        Some(p) => p,
+        None => return -abi::EBADF,
+    };
+    if count == 0 {
+        return 0; // нулевая запись — 0, без `-EPIPE` (как в Linux)
+    }
+    let written = uaccess::with_user_bytes(buf, count, |bytes| {
+        interrupts::without_interrupts(|| {
+            let mut b = pipe.lock();
+            if b.readers == 0 {
+                return -abi::EPIPE; // некому читать
+            }
+            b.data.extend(bytes.iter().copied());
+            bytes.len() as i64
+        })
+    });
+    match written {
+        Ok(n) => {
+            if n > 0 {
+                crate::sched::thread::wake_pipe_waiters(); // разбудить читателей
+            }
+            n
+        }
+        Err(errno) => -errno,
+    }
 }
 
 /// `lseek(fd, offset, whence)` — двигает позицию чтения файла; возвращает новую позицию.

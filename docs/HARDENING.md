@@ -267,9 +267,22 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   copies of the same file (via `fork` or `dup2`) each flush independently → **last-writer-wins / lost
   update**; and `dup2` over a dirty writable `newfd` drops its unflushed buffer silently. The shell
   redirect flow (open→`dup2`→close, only the child writes) avoids these, but direct `dup2`/`fork`
-  use with writable files hits them. Still **no** `unlink`/`rmdir`/`stat`/`pipe`/`rename`, no LFN
+  use with writable files hits them. Still **no** `unlink`/`rmdir`/`stat`/`rename`, no LFN
   (root + 8.3 only), paths capped at 256 bytes. A real file model (streaming, shared open-file
   table, atomic append, a proper VFS with mounts/inodes) is later work.
+- **Pipes are minimal (M7g2).** `pipe(2)` + read/write/`dup2` work and the shell runs `a | b`, but:
+  the pipe buffer is **unbounded** (writes never block / apply no backpressure — a fast producer
+  into a slow/stalled consumer grows kernel memory without limit); a write with no readers returns
+  `-EPIPE` instead of raising **SIGPIPE** (there's no signal); the shell supports only a **single**
+  `|` (two commands, no `a | b | c`) and **doesn't pipe builtins** (`pwd | …` runs pwd to the
+  terminal). The shell waits the left child before the right — safe ONLY because writes never
+  block; **if the buffer is ever bounded, this must change** (a left producer that fills the pipe
+  while the parent blocks in `wait4(left)` and never runs the right consumer would deadlock — wait
+  on `-1`/both instead). A bounded ring buffer with blocking writes, SIGPIPE, and multi-stage
+  pipelines are later work. Lock-order note: a pipe end's `Drop` takes the `PipeBuf` lock while the
+  `PROCESSES` lock is held (close/dup2/exit), whereas `read`/`write` take `PipeBuf` without
+  `PROCESSES` — harmless on the single core (IF=0 syscalls, no reentrancy) but an inconsistency to
+  resolve before SMP (see the spinlock note below).
 - **Per-process fd table keyed by CR3 (M6d2; leak fixed M6e3).** `syscall::files` stores each
   process's open files in a `BTreeMap` keyed by its PML4 physical address (avoids touching the
   scheduler). Now that frames are recycled (M6e1), the reaper **must** drop the entry on exit
