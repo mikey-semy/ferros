@@ -76,6 +76,10 @@ pub static IDTEST_ELF: &[u8] = include_bytes!(env!("USER_IDTEST_ELF"));
 /// Встроенная проверка `writev`/`readv`/`fcntl` (M9f) через канал.
 pub static IOVECCHECK_ELF: &[u8] = include_bytes!(env!("USER_IOVECCHECK_ELF"));
 
+/// Первая программа на **C** (M9g): собрана clang'ом (свободностоящая, без libc), пишет строку
+/// через `write(1)` и выходит — доказывает, что C-код работает в кольце 3 на ferros.
+pub static HELLO_C_ELF: &[u8] = include_bytes!(env!("USER_HELLO_C_ELF"));
+
 /// Встроенный запускатель (M7b): `execve("ARGVECHO", ["ARGVECHO","ping","pong"])` — проверяет
 /// передачу argv через execve. Целевой `ARGVECHO` лежит на диске.
 pub static EXECARGV_ELF: &[u8] = include_bytes!(env!("USER_EXECARGV_ELF"));
