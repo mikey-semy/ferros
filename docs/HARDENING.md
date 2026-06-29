@@ -267,9 +267,16 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   copies of the same file (via `fork` or `dup2`) each flush independently → **last-writer-wins / lost
   update**; and `dup2` over a dirty writable `newfd` drops its unflushed buffer silently. The shell
   redirect flow (open→`dup2`→close, only the child writes) avoids these, but direct `dup2`/`fork`
-  use with writable files hits them. Still **no** `unlink`/`rmdir`/`stat`/`rename`, no LFN
-  (root + 8.3 only), paths capped at 256 bytes. A real file model (streaming, shared open-file
-  table, atomic append, a proper VFS with mounts/inodes) is later work.
+  use with writable files hits them. `unlink`/`rmdir` exist (M7g3) but are minimal: `rmdir` only
+  removes an **empty** dir (no recursive `rm -r`), deletion marks the dir entry `0xE5` then frees
+  the cluster chain (no LFN-chain cleanup since we don't write LFN). There is **no reference
+  counting / delete-on-last-close**: unlinking a file a process has open for writing removes the
+  entry, but the open fd keeps its in-memory copy AND **`close`/exit flushes it back via
+  `write_file`, re-creating the file on disk** (a "resurrection"). Not reachable from the shell
+  (`rm` holds no fd), but a real hazard for a program that unlinks its own open file; a proper
+  open-file/inode model with link counts is the fix. Still **no** `stat`/`rename`/`truncate`, no LFN (root + 8.3 only),
+  paths capped at 256 bytes. A real file model (streaming, shared open-file table, atomic append, a
+  proper VFS with mounts/inodes) is later work.
 - **Pipes are minimal (M7g2).** `pipe(2)` + read/write/`dup2` work and the shell runs `a | b`, but:
   the pipe buffer is **unbounded** (writes never block / apply no backpressure — a fast producer
   into a slow/stalled consumer grows kernel memory without limit); a write with no readers returns

@@ -42,3 +42,15 @@ pub fn mkdir(path: &str) -> Result<(), fat::FatError> {
     let volume = fat::Fat32::mount()?;
     volume.mkdir(path)
 }
+
+/// Удаляет файл по пути (M7g3). `-IsADirectory`, если путь — каталог (для него [`rmdir`]).
+pub fn unlink(path: &str) -> Result<(), fat::FatError> {
+    let volume = fat::Fat32::mount()?;
+    volume.unlink(path)
+}
+
+/// Удаляет пустой каталог по пути (M7g3). `-NotEmpty`, если в нём есть записи.
+pub fn rmdir(path: &str) -> Result<(), fat::FatError> {
+    let volume = fat::Fat32::mount()?;
+    volume.rmdir(path)
+}

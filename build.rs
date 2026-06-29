@@ -37,6 +37,8 @@ fn main() {
         "src/cat.rs",
         "src/ls.rs",
         "src/mkdir.rs",
+        "src/rm.rs",
+        "src/rmdir.rs",
         "Cargo.toml",
         "Cargo.lock",
         "linker.ld",
@@ -76,7 +78,7 @@ fn main() {
     // Бинарники, что собираются, но в ядро НЕ встраиваются (только кладутся на диск) — в списке
     // `binaries` их нет, поэтому удаляем их ELF отдельно, чтобы изменения linker.ld/target тоже
     // принудительно перелинковали их. `argvecho` — фикстура M7b; echo/cat/ls/mkdir — coreutils M7f.
-    for bin in ["argvecho", "echo", "cat", "ls", "mkdir"] {
+    for bin in ["argvecho", "echo", "cat", "ls", "mkdir", "rm", "rmdir"] {
         let _ = std::fs::remove_file(format!("{out_dir}/{bin}"));
     }
 
@@ -134,8 +136,8 @@ const FAT_TEST_CONTENT: &[u8] = b"ferros M6c: hello from FAT32!\n";
 /// набора файлов/содержимого → образ пересоздаётся, хотя размер прежний. v3: ARGVECHO (M7b);
 /// v4: каталог SUB + SUB/INSIDE.TXT (M7c); v5: каталог /BIN с coreutils (M7f); v6: cat читает
 /// stdin (M7g1) — нужен новый бинарь /BIN/CAT; v7: свежий образ (тесты редиректов пишут в /SUB,
-/// чтобы не переполнять корневой каталог — у FAT нет роста каталога).
-const DISK_VERSION: u32 = 7;
+/// чтобы не переполнять корневой каталог — у FAT нет роста каталога); v8: /BIN/RM + /BIN/RMDIR (M7g3).
+const DISK_VERSION: u32 = 8;
 
 /// Создаёт тестовый образ диска (M6c/M6f2): форматирует его как **FAT32** и кладёт тестовый
 /// файл плюс пользовательские ELF-программы (для `execve` по пути — M6f2). Образ —
@@ -231,6 +233,8 @@ fn generate_disk_image(manifest: &str) {
             ("CAT", "cat"),
             ("LS", "ls"),
             ("MKDIR", "mkdir"),
+            ("RM", "rm"),
+            ("RMDIR", "rmdir"),
         ] {
             let elf_path = PathBuf::from(manifest)
                 .join(format!("user/hello/target/x86_64-user/release/{src}"));
