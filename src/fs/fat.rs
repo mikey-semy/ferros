@@ -114,6 +114,15 @@ pub struct DirItem {
     pub is_dir: bool,
 }
 
+/// Метаданные пути для `stat` (M9c): тип, размер в байтах и первый кластер (служит «инодом» —
+/// он уникален для непустого файла/каталога). Времена/владельца FAT не хранит — их синтезирует
+/// сисколл-слой.
+pub struct Metadata {
+    pub is_dir: bool,
+    pub size: u32,
+    pub first_cluster: u32,
+}
+
 /// Результат [`Fat32::lookup`]: путь — либо файл (его содержимое), либо каталог (его листинг).
 pub enum Node {
     File(Vec<u8>),
@@ -341,6 +350,27 @@ impl Fat32 {
         } else {
             Ok(Node::File(self.read_entry(&entry)?))
         }
+    }
+
+    /// Метаданные пути для `stat` (M9c): тип/размер/первый кластер. Пустой путь / `"/"` — корень
+    /// (каталог, размер 0, «инод» = кластер корня). `-NotFound`, если записи нет.
+    pub fn stat(&self, path: &str) -> Result<Metadata, FatError> {
+        if path.trim_matches('/').is_empty() {
+            return Ok(Metadata {
+                is_dir: true,
+                size: 0,
+                first_cluster: self.root_cluster,
+            });
+        }
+        let (dir_cluster, name) = self.resolve_parent(path)?;
+        let entry = self
+            .find_in_dir(dir_cluster, name)?
+            .ok_or(FatError::NotFound)?;
+        Ok(Metadata {
+            is_dir: entry.is_dir,
+            size: entry.size,
+            first_cluster: entry.first_cluster,
+        })
     }
 
     /// Собирает записи каталога, начинающегося с `dir_cluster`: имя (из формы 8.3) и признак

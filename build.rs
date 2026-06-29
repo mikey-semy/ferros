@@ -41,6 +41,7 @@ fn main() {
         "src/rmdir.rs",
         "src/brktest.rs",
         "src/tlstest.rs",
+        "src/stattest.rs",
         "Cargo.toml",
         "Cargo.lock",
         "linker.ld",
@@ -69,6 +70,7 @@ fn main() {
         ("shell", "USER_SHELL_ELF"),
         ("brktest", "USER_BRKTEST_ELF"),
         ("tlstest", "USER_TLSTEST_ELF"),
+        ("stattest", "USER_STATTEST_ELF"),
     ];
 
     // Удаляем прошлые ELF перед сборкой: cargo не отслеживает linker.ld / target.json как
