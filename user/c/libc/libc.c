@@ -94,6 +94,14 @@ size_t strlen(const char *s) {
     return n;
 }
 
+int strcmp(const char *a, const char *b) {
+    while (*a && *a == *b) {
+        a++;
+        b++;
+    }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
 int putchar(int c) {
     char ch = (char)c;
     return (int)write(1, &ch, 1);
@@ -102,4 +110,131 @@ int putchar(int c) {
 int puts(const char *s) {
     write(1, s, strlen(s));
     return (int)write(1, "\n", 1);
+}
+
+/* --- Форматированный вывод (M9j): минимальный printf-движок --- */
+
+#include <stdarg.h>
+
+/* Кладёт символ в буфер вывода с учётом ёмкости `cap` (оставляя место под завершающий нуль) и
+ * считает ПОЛНУЮ длину в `*pos` (даже если не влезло — как C-printf возвращает «сколько было бы»). */
+static void put_ch(char *out, size_t cap, size_t *pos, char c) {
+    if (*pos + 1 < cap) {
+        out[*pos] = c;
+    }
+    (*pos)++;
+}
+
+static void put_str(char *out, size_t cap, size_t *pos, const char *s) {
+    while (*s) {
+        put_ch(out, cap, pos, *s++);
+    }
+}
+
+/* Беззнаковое `v` в системе счисления `base` (10 или 16); `upper` — заглавный hex. */
+static void put_uint(char *out, size_t cap, size_t *pos, unsigned long v, unsigned base, int upper) {
+    char tmp[20]; /* до 20 цифр десятичного u64 */
+    const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    int i = 0;
+    if (v == 0) {
+        tmp[i++] = '0';
+    }
+    while (v != 0) {
+        tmp[i++] = digits[v % base];
+        v /= base;
+    }
+    while (i > 0) {
+        put_ch(out, cap, pos, tmp[--i]); /* цифры были в обратном порядке */
+    }
+}
+
+int vsnprintf(char *out, size_t cap, const char *fmt, va_list ap) {
+    size_t pos = 0;
+    for (const char *p = fmt; *p != '\0'; p++) {
+        if (*p != '%') {
+            put_ch(out, cap, &pos, *p);
+            continue;
+        }
+        p++;
+        int is_long = 0;
+        if (*p == 'l') { /* модификатор длины (одиночный l) */
+            is_long = 1;
+            p++;
+        }
+        switch (*p) {
+        case 'd':
+        case 'i': {
+            long v = is_long ? va_arg(ap, long) : (long)va_arg(ap, int);
+            unsigned long mag;
+            if (v < 0) {
+                put_ch(out, cap, &pos, '-');
+                mag = 0UL - (unsigned long)v; /* корректно и для LONG_MIN */
+            } else {
+                mag = (unsigned long)v;
+            }
+            put_uint(out, cap, &pos, mag, 10, 0);
+            break;
+        }
+        case 'u': {
+            unsigned long v = is_long ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned int);
+            put_uint(out, cap, &pos, v, 10, 0);
+            break;
+        }
+        case 'x':
+        case 'X': {
+            unsigned long v = is_long ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned int);
+            put_uint(out, cap, &pos, v, 16, *p == 'X');
+            break;
+        }
+        case 'p': {
+            unsigned long v = (unsigned long)va_arg(ap, void *);
+            put_str(out, cap, &pos, "0x");
+            put_uint(out, cap, &pos, v, 16, 0);
+            break;
+        }
+        case 's': {
+            const char *s = va_arg(ap, const char *);
+            put_str(out, cap, &pos, s != 0 ? s : "(null)");
+            break;
+        }
+        case 'c':
+            put_ch(out, cap, &pos, (char)va_arg(ap, int));
+            break;
+        case '%':
+            put_ch(out, cap, &pos, '%');
+            break;
+        case '\0':
+            p--; /* висячий '%' в конце — выйдем по условию цикла */
+            break;
+        default: /* неизвестный спецификатор — печатаем как есть */
+            put_ch(out, cap, &pos, '%');
+            put_ch(out, cap, &pos, *p);
+            break;
+        }
+    }
+    if (cap > 0) {
+        out[pos < cap ? pos : cap - 1] = '\0';
+    }
+    return (int)pos;
+}
+
+int snprintf(char *out, size_t cap, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(out, cap, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+int printf(const char *fmt, ...) {
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    /* Пишем ОДНИМ write (так тест ловит весь вывод по LAST_WRITE; и это естественная буферизация).
+     * Если строка длиннее буфера — пишем сколько влезло (обрезано). */
+    int w = (n < (int)sizeof buf) ? n : (int)(sizeof buf) - 1;
+    write(1, buf, (size_t)w);
+    return n;
 }

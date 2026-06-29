@@ -151,3 +151,22 @@ to that core goal and can follow. Doing the libc-facing syscalls first (rather t
 straight at a relibc port) keeps each step a small, observable, independently-testable PR —
 e.g. M9a `brk` lands a working process heap (malloc's foundation) provable from ring 3 on its
 own, long before any libc is in the tree.
+
+## D13 — Build-vs-reuse: reasonable reuse (hand-roll what we can, vendor the genuinely hard, open-source only)
+
+**Decision:** Resolve the "learning project vs build-to-last product" tension (CLAUDE.md frames
+ferros as both) toward **reasonable reuse**: what we can *reasonably* implement ourselves — and that
+teaches and stays in our control — we write ourselves; the *genuinely complex* pieces we take
+ready-made, but **only open-source** (verify the license before vendoring).
+- **Hand-roll:** the OS core (scheduler, mm policy, syscall dispatch — no crate exists anyway), the
+  small/teachable userspace pieces (minimal `printf`/stdio, string/mem, crt0), and the narrow
+  subsets we actually use of formats like FAT/ELF.
+- **Vendor (open-source):** CPU plumbing (`x86_64`, `pic8259`, `uart_16550`), the heap allocator
+  (`linked_list_allocator`), the network stack (`smoltcp`, M8), a real **libc (`relibc`)** once its
+  build is reachable, and anything large / security-sensitive / easy-to-get-wrong.
+**Why:** avoid NIH on the genuinely hard stuff, but don't pull a dependency (a ring-0 trust + build
+burden) for things that are small, teachable, and fully controllable. The trigger to revisit a
+hand-rolled piece is when it grows toward "genuinely complex" — e.g. a full C99 `printf`
+(width/precision/floats/locale) or a real VFS — at which point a vetted crate wins. This refines D8
+(Linux-compat north star): the relibc port stays the goal *because* a real libc is exactly the kind
+of complex thing we should reuse — our hand-rolled minimal libc (M9h+) is a bridge until then.

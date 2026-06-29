@@ -159,6 +159,7 @@ fn build_c_programs(manifest: &str) {
         c_dir.join("hello.c"),
         c_dir.join("fputest.c"),
         c_dir.join("demo.c"),
+        c_dir.join("printftest.c"),
         libc_dir.join("crt0.s"),
         libc_dir.join("libc.c"),
         libc_dir.join("libc.h"),
@@ -199,6 +200,22 @@ fn build_c_programs(manifest: &str) {
         &linker,
     );
     println!("cargo:rustc-env=USER_CDEMO_ELF={}", demo_elf.display());
+
+    // M9j: программа `printftest` поверх libc — проверяет printf/snprintf.
+    let printf_o = clang_compile_c(
+        &c_dir.join("printftest.c"),
+        &out_dir.join("printftest.o"),
+        &[&inc],
+    );
+    let printf_elf = clang_link(
+        &[&crt0_o, &libc_o, &printf_o],
+        &out_dir.join("printftest"),
+        &linker,
+    );
+    println!(
+        "cargo:rustc-env=USER_PRINTFTEST_ELF={}",
+        printf_elf.display()
+    );
 }
 
 /// Общие флаги компиляции C для пользовательского таргета ferros (см. [`build_c_programs`]).
