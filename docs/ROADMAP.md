@@ -144,9 +144,11 @@ Linux software → libc first): **M9a–M9f** built the libc-facing syscall surf
   - **M8a — NIC detection** (done). QEMU gets a `virtio-net-pci` over user-mode (SLIRP) networking;
     `drivers/virtio_net` finds the device (`1af4:1000`, legacy I/O BAR like virtio-blk), does the
     status handshake, and reads its MAC. Proves the NIC is visible.
-  - **M8b** — the driver proper: RX/TX virtqueues + frame send/receive, tested by an ARP round-trip
-    against the SLIRP gateway (10.0.2.2). **M8c** — `smoltcp` integration (DHCP, ICMP ping).
-    **M8d** — sockets.
+  - **M8b — the driver proper** (done). Two virtqueues (RX/TX, shared `Virtq` type), the 10-byte
+    `virtio_net_hdr`, `send`/`recv` of Ethernet frames. Tested by a deterministic **ARP round-trip**
+    against the SLIRP gateway: ARP-who-has 10.0.2.2 → SLIRP's ARP reply (sender IP 10.0.2.2) comes
+    back on RX.
+  - **M8c** — `smoltcp` integration (DHCP, ICMP ping). **M8d** — sockets.
 - **M10 — Graphics / GUI (optional, huge).** Framebuffer, compositor, window
   manager, toolkit.
 - **M11 — Real hardware.** UEFI boot (migrate off bootloader 0.9), drivers for a
