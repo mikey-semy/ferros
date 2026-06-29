@@ -45,10 +45,59 @@
 //! кооперативный `yield`.
 
 use super::gdt;
+use alloc::boxed::Box;
+use core::arch::asm;
 use x86_64::registers::control::Cr3;
 use x86_64::registers::model_specific::FsBase;
 use x86_64::structures::paging::PhysFrame;
 use x86_64::VirtAddr;
+
+/// Область сохранения состояния FPU/SSE одного потока (M9i): формат инструкции `fxsave` — 512 байт,
+/// выровненных по 16 (требование `fxsave`/`fxrstor`). Хранит x87, `MXCSR` и регистры XMM. Нужна,
+/// потому что с M9h код кольца 3 использует SSE, а `switch_context` сохраняет лишь GP-регистры —
+/// без этого XMM протекали бы между процессами.
+#[repr(C, align(16))]
+pub struct FpuArea([u8; 512]);
+
+impl FpuArea {
+    /// «Чистая» область: нули + дефолтные `FCW=0x037F` (@0) и `MXCSR=0x1F80` (@24) — валидный
+    /// начальный образ для `fxrstor`. Для потоков ядра (FPU не используют).
+    pub fn new_clean() -> Box<FpuArea> {
+        let mut area = Box::new(FpuArea([0u8; 512]));
+        area.0[0..2].copy_from_slice(&0x037Fu16.to_le_bytes()); // FCW
+        area.0[24..28].copy_from_slice(&0x1F80u32.to_le_bytes()); // MXCSR
+        area
+    }
+
+    /// Снимок ТЕКУЩЕГО состояния FPU/SSE в новую область. Для нового пользовательского потока:
+    /// `spawn_user` снимет (чистое) состояние спавнящего, а `fork` — состояние родителя, поэтому
+    /// ребёнок наследует FPU родителя (как в Linux).
+    pub fn save_current() -> Box<FpuArea> {
+        let mut area = Box::new(FpuArea([0u8; 512]));
+        let ptr = area.0.as_mut_ptr();
+        // SAFETY: область 512 байт, выровнена по 16; `CR4.OSFXSR` включён (`arch::enable_sse`).
+        unsafe { asm!("fxsave [{}]", in(reg) ptr, options(nostack, preserves_flags)) };
+        area
+    }
+}
+
+/// Сохраняет текущее состояние FPU/SSE в `area` (`fxsave`).
+///
+/// # Safety
+/// `area` — валидная 16-байт-выровненная область 512 байт; `CR4.OSFXSR` включён.
+unsafe fn fxsave(area: *mut FpuArea) {
+    // SAFETY: контракт функции; `fxsave` пишет 512 байт по `area`.
+    unsafe { asm!("fxsave [{}]", in(reg) area, options(nostack, preserves_flags)) };
+}
+
+/// Загружает состояние FPU/SSE из `area` (`fxrstor`).
+///
+/// # Safety
+/// `area` — валидная 16-байт-выровненная область, ранее заполненная `fxsave`/`new_clean`.
+unsafe fn fxrstor(area: *const FpuArea) {
+    // SAFETY: контракт функции; `fxrstor` читает 512 байт по `area`, пишет регистры FPU.
+    unsafe { asm!("fxrstor [{}]", in(reg) area, options(nostack, preserves_flags, readonly)) };
+}
 
 // Ассемблер: чистый пролог/эпилог без участия компилятора. Синтаксис Intel (по
 // умолчанию в Rust). Аргументы switch_context по System V: rdi = old_rsp (куда
@@ -225,7 +274,18 @@ pub unsafe fn switch_task(
     next_cr3: PhysFrame,
     next_rsp0: u64,
     next_fs_base: u64,
+    old_fpu: *mut FpuArea,
+    next_fpu: *const FpuArea,
 ) {
+    // Сохраняем FPU/SSE уходящей задачи и грузим состояние входящей (M9i): с M9h кольцо 3
+    // пользуется XMM, а `switch_context` их не трогает — без этого регистры XMM/MXCSR протекли бы
+    // между процессами. Ядро soft-float, поэтому между fxrstor и переключением FPU не портится.
+    // SAFETY: обе области — валидные 16-байт-выровненные `FpuArea` (живут в `Thread`); OSFXSR включён.
+    unsafe {
+        fxsave(old_fpu);
+        fxrstor(next_fpu);
+    }
+
     // SAFETY: rsp0 пишем с IF=0 (требование set_kernel_stack).
     unsafe { gdt::set_kernel_stack(VirtAddr::new(next_rsp0)) };
 
