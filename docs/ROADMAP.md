@@ -139,8 +139,14 @@ Linux software → libc first): **M9a–M9f** built the libc-facing syscall surf
   - **M9i — FPU/SSE context save** (done). Now that ring 3 uses SSE, `switch_task` `fxsave`/`fxrstor`s
     a per-thread FPU area on every switch (inherited on `fork`), so XMM/MXCSR no longer leak between
     processes. Next: grow the libc (`printf`/stdio), and/or revisit relibc when its build is reachable.
-- **M8 — Networking.** NIC driver (virtio-net / e1000), TCP/IP via `smoltcp`,
-  ping, sockets.
+- **M8 — Networking** (in progress). NIC driver (virtio-net) + TCP/IP via `smoltcp` (vendored per
+  D13 — a real stack is the "genuinely complex" kind we reuse). Stages:
+  - **M8a — NIC detection** (done). QEMU gets a `virtio-net-pci` over user-mode (SLIRP) networking;
+    `drivers/virtio_net` finds the device (`1af4:1000`, legacy I/O BAR like virtio-blk), does the
+    status handshake, and reads its MAC. Proves the NIC is visible.
+  - **M8b** — the driver proper: RX/TX virtqueues + frame send/receive, tested by an ARP round-trip
+    against the SLIRP gateway (10.0.2.2). **M8c** — `smoltcp` integration (DHCP, ICMP ping).
+    **M8d** — sockets.
 - **M10 — Graphics / GUI (optional, huge).** Framebuffer, compositor, window
   manager, toolkit.
 - **M11 — Real hardware.** UEFI boot (migrate off bootloader 0.9), drivers for a

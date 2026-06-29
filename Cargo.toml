@@ -64,11 +64,17 @@ test-args = [
     "-display", "none",
     "-drive", "if=none,id=disk0,format=raw,file=target/ferros-disk.img",
     "-device", "virtio-blk-pci,drive=disk0",
+    # Сетевая карта virtio-net (M8a) поверх user-mode сети QEMU (SLIRP): даёт NIC с MAC, DHCP и
+    # шлюзом 10.0.2.2 без настройки хоста. Под драйвер сети (детекция MAC сейчас, RX/TX — M8b).
+    "-netdev", "user,id=net0",
+    "-device", "virtio-net-pci,netdev=net0",
 ]
 # Те же аргументы для обычного `cargo run` (bootimage добавляет их к команде запуска).
 run-args = [
     "-drive", "if=none,id=disk0,format=raw,file=target/ferros-disk.img",
     "-device", "virtio-blk-pci,drive=disk0",
+    "-netdev", "user,id=net0",
+    "-device", "virtio-net-pci,netdev=net0",
 ]
 # Код выхода QEMU при успехе: (0x10 << 1) | 1 = 33.
 test-success-exit-code = 33
