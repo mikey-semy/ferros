@@ -132,6 +132,11 @@ path = "src/stattest.rs"
 name = "timetest"
 path = "src/timetest.rs"
 
+# Проверка id/uname (M9e): getuid/getppid/uname. Встраивается в ядро.
+[[bin]]
+name = "idtest"
+path = "src/idtest.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"

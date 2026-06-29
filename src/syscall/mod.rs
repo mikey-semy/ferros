@@ -22,6 +22,7 @@
 pub mod abi;
 pub mod elf;
 pub mod files;
+pub mod sysinfo;
 pub mod time;
 pub mod uaccess;
 
@@ -78,6 +79,10 @@ pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
         abi::SYS_RMDIR => files::sys_rmdir(args[0]),
         abi::SYS_UNLINK => files::sys_unlink(args[0]),
         abi::SYS_GETPID => crate::sched::thread::current_pid() as i64,
+        abi::SYS_GETPPID => crate::sched::thread::current_ppid() as i64,
+        // Пользователей/групп у нас нет — всё от root (0), как у однопользовательской системы (M9e).
+        abi::SYS_GETUID | abi::SYS_GETEUID | abi::SYS_GETGID | abi::SYS_GETEGID => 0,
+        abi::SYS_UNAME => sysinfo::sys_uname(args[0]),
         abi::SYS_WAIT4 => sys_wait4(args[0] as i64, args[1]),
         abi::SYS_KILL => sys_kill(args[0] as i64, args[1]),
         abi::SYS_EXIT | abi::SYS_EXIT_GROUP => {
