@@ -34,12 +34,40 @@ pub const USER_HEAP_MAX: u64 = USER_HEAP_BASE + 0x4000_0000;
 const _: () = assert!(USER_HEAP_BASE.is_multiple_of(4096));
 const _: () = assert!(USER_HEAP_MAX > USER_HEAP_BASE && USER_HEAP_MAX < USER_SPACE_END);
 
+/// Включает инструкции **SSE** (M9h). x86-64 предполагает SSE2 как базовый набор, и компиляторы C
+/// (clang) по умолчанию векторизуют циклы в SSE. Само ядро собрано soft-float и SSE не эмитит, но
+/// **разрешить** их обязано — иначе первая же SSE-инструкция из кольца 3 (C-код, libc) даёт #UD/#NM
+/// (а так как обработчиков под них нет — двойную ошибку и падение).
+///
+/// CR0: снять `EM` (без эмуляции FPU) и `TS` (без ленивого #NM на первой SSE), поставить `MP`.
+/// CR4: `OSFXSR` (включает SSE + `fxsave`/`fxrstor`) и `OSXMMEXCPT` (разрешает #XM на
+/// немаскированные SIMD-исключения; по умолчанию `MXCSR` всё маскирует, поэтому у обычного кода
+/// #XM не возникает). Вызывать один раз на старте, до входа в кольцо 3.
+fn enable_sse() {
+    use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
+    // SAFETY: только снимаем запрет на SSE до запуска пользовательского кода. Ядро SSE не
+    // использует (soft-float), поэтому на его работу включение не влияет.
+    unsafe {
+        Cr0::update(|f| {
+            f.remove(Cr0Flags::EMULATE_COPROCESSOR);
+            f.insert(Cr0Flags::MONITOR_COPROCESSOR);
+            f.remove(Cr0Flags::TASK_SWITCHED);
+        });
+        Cr4::update(|f| {
+            f.insert(Cr4Flags::OSFXSR);
+            f.insert(Cr4Flags::OSXMMEXCPT_ENABLE);
+        });
+    }
+}
+
 /// Инициализация процессора под x86_64.
 ///
 /// Порядок критичен: сначала GDT+TSS (даёт IST-стек для double fault и селекторы колец),
 /// затем IDT (ссылается на IST-стек), затем настройка `syscall` (берёт селекторы из GDT),
 /// затем перемап PIC и `sti`. После `sti` ядро реагирует на аппаратные прерывания.
 pub fn init() {
+    // Разрешаем SSE до всего остального: C-код из кольца 3 (M9h) предполагает SSE2.
+    enable_sse();
     gdt::init();
     interrupts::init_idt();
     // M5: настройка инструкции `syscall` (MSR STAR/LSTAR/SFMASK, EFER.SCE). После GDT —

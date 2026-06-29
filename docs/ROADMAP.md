@@ -127,8 +127,16 @@ Linux software → libc first): **M9a–M9f** built the libc-facing syscall surf
   - **M9g — first C program** (done). A clang-compiled freestanding C binary (no libc) runs in
     ring 3 and makes Linux syscalls — proves the clang→ELF→loader→ring-3 path and the C ABI.
     `build.rs` now compiles C user programs (`clang -ffreestanding -mcmodel=large` + our linker
-    script), so **clang/lld is a build requirement**. This is the foundation for a libc; next is a
-    minimal libc (then relibc), built up incrementally on this path.
+    script), so **clang/lld is a build requirement**.
+  - **relibc recon** (done, blocked). Confirmed relibc has a `linux` platform backend making raw
+    Linux syscalls (our ABI), so it's a valid eventual target — but its build is blocked here: the
+    required `dlmalloc-rs` submodule lives only on the slow `gitlab.redox-os.org` (clone times out),
+    plus Redox-centric deps. Pivoted to a hand-rolled minimal libc.
+  - **M9h — minimal libc** (done). `user/c/libc`: `crt0` (`_start`→`main`+argv→`exit`),
+    `malloc`/`free` (bump over `brk`), `mem`/`str`/`puts`. A C program with a standard `int main()` +
+    `malloc` runs. Required **enabling SSE** at boot (`arch::enable_sse`) — clang `-O2` vectorizes to
+    SSE, which x86-64 mandates; the kernel stays soft-float. Next: grow the libc (`printf`/stdio),
+    and/or revisit relibc when its build is reachable.
 - **M8 — Networking.** NIC driver (virtio-net / e1000), TCP/IP via `smoltcp`,
   ping, sockets.
 - **M10 — Graphics / GUI (optional, huge).** Framebuffer, compositor, window
