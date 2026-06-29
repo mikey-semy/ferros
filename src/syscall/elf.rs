@@ -67,6 +67,9 @@ pub static TLSTEST_ELF: &[u8] = include_bytes!(env!("USER_TLSTEST_ELF"));
 /// Встроенная проверка `stat`/`fstat` (M9c): метаданные файла/каталога/дескриптора.
 pub static STATTEST_ELF: &[u8] = include_bytes!(env!("USER_STATTEST_ELF"));
 
+/// Встроенная проверка времени (M9d): `clock_gettime`/`gettimeofday`/`time` — время идёт вперёд.
+pub static TIMETEST_ELF: &[u8] = include_bytes!(env!("USER_TIMETEST_ELF"));
+
 /// Встроенный запускатель (M7b): `execve("ARGVECHO", ["ARGVECHO","ping","pong"])` — проверяет
 /// передачу argv через execve. Целевой `ARGVECHO` лежит на диске.
 pub static EXECARGV_ELF: &[u8] = include_bytes!(env!("USER_EXECARGV_ELF"));

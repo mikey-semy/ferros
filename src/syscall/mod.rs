@@ -22,6 +22,7 @@
 pub mod abi;
 pub mod elf;
 pub mod files;
+pub mod time;
 pub mod uaccess;
 
 use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -64,6 +65,9 @@ pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
         // lstat == stat: симссылок у нас нет, следовать не по чему.
         abi::SYS_STAT | abi::SYS_LSTAT => files::sys_stat(args[0], args[1]),
         abi::SYS_FSTAT => files::sys_fstat(args[0], args[1]),
+        abi::SYS_CLOCK_GETTIME => time::sys_clock_gettime(args[0], args[1]),
+        abi::SYS_GETTIMEOFDAY => time::sys_gettimeofday(args[0], args[1]),
+        abi::SYS_TIME => time::sys_time(args[0]),
         abi::SYS_PIPE => files::sys_pipe(args[0]),
         abi::SYS_DUP2 => files::sys_dup2(args[0], args[1]),
         abi::SYS_GETDENTS64 => files::sys_getdents64(args[0], args[1], args[2]),
