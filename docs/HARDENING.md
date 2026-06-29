@@ -366,6 +366,18 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   them stay allocated until the address space is torn down on `exit`. Fine for the typical
   grow-mostly malloc pattern; a workload that repeatedly grows and shrinks a large heap would
   accrete page-table frames.
+- **Time is uptime, not wall-clock; tick-coarse (M9d).** `clock_gettime`/`gettimeofday`/`time`
+  derive from the PIT tick counter (uptime since boot), so **`CLOCK_REALTIME` is not real wall-clock
+  time** — it starts at 0 at boot, not the Unix epoch (there's no RTC read yet; reading the CMOS RTC
+  at boot for a real epoch is the fix). `CLOCK_MONOTONIC` == `CLOCK_REALTIME` (same source).
+  Resolution is one PIT tick (~54.9 ms) — time is a staircase, not smooth, so sub-tick intervals
+  read as zero. No `CLOCK_PROCESS_CPUTIME_ID`/per-thread clocks, no `clock_getres`, no `settimeofday`/
+  `clock_settime`. The PIT divisor is the power-on default (~18.2 Hz); a finer tick (e.g. 1 kHz) or a
+  TSC/HPET time source would improve resolution.
+- **`stat` timestamps stay zero even now that a clock exists (M9d).** `build_stat` still writes 0 for
+  `st_atime`/`mtime`/`ctime`: the clock gives "now", but a file's stored mtime (which FAT keeps and we
+  don't read) is the correct value, and stamping every `stat` with the current time would be wrong.
+  Reading FAT's date/time fields is the real fix.
 - **`stat` is a thin synthesis, not real metadata (M9c).** Timestamps (`st_atime`/`mtime`/`ctime`)
   are all 0 — we have no clock yet (M9d); FAT does store a mtime we don't read. `st_ino` is the
   file's first cluster, which is **0 for empty files** (so not unique, and `stat`/`fstat` can

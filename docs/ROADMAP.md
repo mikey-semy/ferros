@@ -9,8 +9,8 @@ in `/bin`): keyboard input via `read(0)`, programs launched with arguments
 (`cd`/`pwd`/relative paths). The full Unix-process core (PIDs, `fork`/`execve`/`wait4`,
 basic signals, memory reclamation) and a readable-writable hierarchical FAT32 underpin it.
 **Now on the libc track (M9), prioritized over M8 networking** per the north star (run
-Linux software → libc first): **M9a `brk`**, **M9b TLS (`arch_prctl`)**, **M9c `stat`/`fstat`
-done**; next are the remaining libc-facing syscalls (time, `writev`/`fcntl`/`uname`).
+Linux software → libc first): **M9a `brk`**, **M9b TLS (`arch_prctl`)**, **M9c `stat`/`fstat`**,
+**M9d time done**; next are the remaining libc-facing syscalls (`writev`/`fcntl`/`uname`/ids).
 
 > **North star (D8):** run the existing **Linux** software ecosystem rather than write a
 > native app ecosystem from scratch. Long-term aim is **ABI-level** compatibility
@@ -116,8 +116,9 @@ done**; next are the remaining libc-facing syscalls (time, `writev`/`fcntl`/`una
   - **M9c — file metadata (`stat`/`fstat`/`lstat`)** (done). Synthesizes the Linux x86-64
     `struct stat` (type + size + pseudo-inode) by exact ABI offsets; `fstat` distinguishes the fd
     backing (regular/dir/char-device/FIFO, so `isatty` works).
-  - **M9d — time (`clock_gettime`/`gettimeofday`)** (next), then `writev`/`fcntl`/`uname`/id
-    syscalls — the rest of the libc-facing surface.
+  - **M9d — time (`clock_gettime`/`gettimeofday`/`time`)** (done). Derives uptime from the PIT tick
+    counter (`u128` tick→ns conversion); REALTIME == MONOTONIC == uptime (no RTC yet). Then
+    `writev`/`fcntl`/`uname`/id syscalls — the rest of the libc-facing surface, then the relibc port.
 - **M8 — Networking.** NIC driver (virtio-net / e1000), TCP/IP via `smoltcp`,
   ping, sockets.
 - **M10 — Graphics / GUI (optional, huge).** Framebuffer, compositor, window

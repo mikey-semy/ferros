@@ -35,6 +35,11 @@ pub use self::x86_64::pci;
 #[cfg(target_arch = "x86_64")]
 pub use self::x86_64::io;
 
+// Арх-нейтральный источник времени (M9d): переносимые сисколлы времени (`clock_gettime` и др.)
+// берут uptime отсюда, не зная про PIT.
+#[cfg(target_arch = "x86_64")]
+pub use self::x86_64::interrupts::uptime_ns;
+
 /// Инициализация процессора под текущую целевую архитектуру (роутинг по `cfg`).
 #[cfg(target_arch = "x86_64")]
 pub fn init() {
