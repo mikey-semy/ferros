@@ -37,6 +37,14 @@ ssize_t read(int fd, void *buf, size_t n) {
     return sc3(0, fd, (long)buf, (long)n); /* SYS_read */
 }
 
+int open(const char *path, int flags) {
+    return (int)sc3(2, (long)path, flags, 0); /* SYS_open(path, flags, mode=0) */
+}
+
+int close(int fd) {
+    return (int)sc1(3, fd); /* SYS_close */
+}
+
 /* --- Куча: bump-аллокатор поверх brk (сисколл 12). --- */
 
 static char *heap_cur; /* текущий конец занятой кучи (следующее malloc отдаёт отсюда) */

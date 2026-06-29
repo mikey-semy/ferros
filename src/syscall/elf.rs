@@ -93,6 +93,9 @@ pub static PRINTFTEST_ELF: &[u8] = include_bytes!(env!("USER_PRINTFTEST_ELF"));
 /// Проверка строковых/мемори функций libc (M9k): `memmove`/`strncmp`/`strchr`/`atoi`/…
 pub static LIBCHECK_ELF: &[u8] = include_bytes!(env!("USER_LIBCHECK_ELF"));
 
+/// Прикладной C-файлридер (M9l): открывает `/HELLO.TXT` через libc, читает и выводит — ядро `cat`.
+pub static CATFILE_ELF: &[u8] = include_bytes!(env!("USER_CATFILE_ELF"));
+
 /// Встроенный запускатель (M7b): `execve("ARGVECHO", ["ARGVECHO","ping","pong"])` — проверяет
 /// передачу argv через execve. Целевой `ARGVECHO` лежит на диске.
 pub static EXECARGV_ELF: &[u8] = include_bytes!(env!("USER_EXECARGV_ELF"));
