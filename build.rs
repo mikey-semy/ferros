@@ -162,6 +162,7 @@ fn build_c_programs(manifest: &str) {
         c_dir.join("printftest.c"),
         c_dir.join("libcheck.c"),
         c_dir.join("catfile.c"),
+        c_dir.join("ccat.c"),
         libc_dir.join("crt0.s"),
         libc_dir.join("libc.c"),
         libc_dir.join("libc.h"),
@@ -247,6 +248,12 @@ fn build_c_programs(manifest: &str) {
         &linker,
     );
     println!("cargo:rustc-env=USER_CATFILE_ELF={}", catfile_elf.display());
+
+    // M9m: `ccat` — утилита cat на C поверх libc. НЕ встраивается в ядро: кладётся на диск в /BIN
+    // (см. generate_disk_image), shell запускает её как обычный coreutil. Собираем в OUT_DIR;
+    // переменную окружения не выставляем — образ диска прочитает ELF из OUT_DIR.
+    let ccat_o = clang_compile_c(&c_dir.join("ccat.c"), &out_dir.join("ccat.o"), &[&inc]);
+    clang_link(&[&crt0_o, &libc_o, &ccat_o], &out_dir.join("ccat"), &linker);
 }
 
 /// Общие флаги компиляции C для пользовательского таргета ferros (см. [`build_c_programs`]).
@@ -332,8 +339,9 @@ const FAT_TEST_CONTENT: &[u8] = b"ferros M6c: hello from FAT32!\n";
 /// набора файлов/содержимого → образ пересоздаётся, хотя размер прежний. v3: ARGVECHO (M7b);
 /// v4: каталог SUB + SUB/INSIDE.TXT (M7c); v5: каталог /BIN с coreutils (M7f); v6: cat читает
 /// stdin (M7g1) — нужен новый бинарь /BIN/CAT; v7: свежий образ (тесты редиректов пишут в /SUB,
-/// чтобы не переполнять корневой каталог — у FAT нет роста каталога); v8: /BIN/RM + /BIN/RMDIR (M7g3).
-const DISK_VERSION: u32 = 8;
+/// чтобы не переполнять корневой каталог — у FAT нет роста каталога); v8: /BIN/RM + /BIN/RMDIR (M7g3);
+/// v9: /BIN/CCAT — утилита cat на C поверх libc (M9m).
+const DISK_VERSION: u32 = 9;
 
 /// Создаёт тестовый образ диска (M6c/M6f2): форматирует его как **FAT32** и кладёт тестовый
 /// файл плюс пользовательские ELF-программы (для `execve` по пути — M6f2). Образ —
@@ -444,6 +452,18 @@ fn generate_disk_image(manifest: &str) {
             f.flush()
                 .unwrap_or_else(|e| panic!("flush BIN/{file} on disk image: {e}"));
         }
+
+        // C-coreutil `ccat` (M9m): ELF собран build_c_programs в OUT_DIR. Имя 8.3 заглавными.
+        let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set for disk image");
+        let ccat_elf = PathBuf::from(&out_dir).join("ccat");
+        let ccat_bytes = std::fs::read(&ccat_elf)
+            .unwrap_or_else(|e| panic!("read {} for disk image: {e}", ccat_elf.display()));
+        let mut f = bin
+            .create_file("CCAT")
+            .expect("create BIN/CCAT on disk image");
+        f.write_all(&ccat_bytes)
+            .expect("write BIN/CCAT on disk image");
+        f.flush().expect("flush BIN/CCAT on disk image");
     }
 
     if let Some(parent) = disk.parent() {
