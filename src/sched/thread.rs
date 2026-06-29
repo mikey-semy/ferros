@@ -114,6 +114,11 @@ struct Thread {
     /// (иначе TLS протёк бы между процессами). 0 — TLS не настроен (потоки ядра, новый процесс).
     /// Наследуется при `fork`, сбрасывается в 0 при `execve` (новый образ настроит свой).
     fs_base: u64,
+    /// Сохранённое состояние FPU/SSE этого потока (M9i): `switch_task` делает `fxsave` сюда при
+    /// уходе и `fxrstor` отсюда при возврате — иначе регистры XMM/MXCSR протекали бы между
+    /// процессами (с M9h кольцо 3 использует SSE). У нового пользовательского процесса — снимок
+    /// FPU спавнящего/родителя (наследование как в Linux); у потоков ядра — «чистое» состояние.
+    fpu: Box<context::FpuArea>,
     /// Состояние.
     state: State,
     /// Причина блокировки (осмысленна при `state == Blocked`): по ней побудчик понимает,
@@ -151,6 +156,7 @@ pub fn init() {
                 cr3: None,
                 kernel_stack_top: 0,
                 fs_base: 0,
+                fpu: context::FpuArea::new_clean(), // «нулевой» поток ядра FPU не использует
                 state: State::Runnable,
                 blocked_on: BlockReason::None,
             }],
@@ -187,7 +193,8 @@ pub fn spawn(entry: extern "C" fn() -> !) {
         stack: Some(stack),
         cr3: None,
         kernel_stack_top: top as u64,
-        fs_base: 0, // поток ядра TLS не использует
+        fs_base: 0,                         // поток ядра TLS не использует
+        fpu: context::FpuArea::new_clean(), // и FPU не использует
         state: State::Runnable,
         blocked_on: BlockReason::None,
     });
@@ -220,6 +227,10 @@ pub fn add_user_task(
         cr3: Some(cr3),
         kernel_stack_top,
         fs_base,
+        // Снимок FPU текущего контекста: для `fork` это состояние родителя (наследуется), для
+        // `spawn_user` — (чистое) состояние спавнящего потока. Дальше поток ведёт своё через
+        // fxsave/fxrstor на переключениях.
+        fpu: context::FpuArea::save_current(),
         state: State::Runnable,
         blocked_on: BlockReason::None,
     });
@@ -625,9 +636,10 @@ pub fn wake_pipe_waiters() {
 /// (главный цикл на «нулевом» потоке, в адресном пространстве ядра, IF=1) — не с мёртвого
 /// стека, который освобождаем.
 ///
-/// Не уплотняет `Vec`: обработанный поток помечается `Reaped` и остаётся «надгробием» (его
-/// структура крошечная) — так не нужно двигать индекс `current`/переключение. Большие
-/// ресурсы (фреймы АП, стек, дескрипторы) при этом возвращаются.
+/// Не уплотняет `Vec`: обработанный поток помечается `Reaped` и остаётся «надгробием» (сама
+/// структура `Thread` мала) — так не нужно двигать индекс `current`/переключение. Большие ресурсы
+/// (фреймы АП, стек, дескрипторы) при этом возвращаются; область FPU (`Box<FpuArea>`, 512 байт)
+/// пока остаётся при надгробии — мелкая утечка на завершённый поток, как и сам `Vec` (HARDENING).
 ///
 /// Делать нечего, пока не установлен глобальный аллокатор ([`crate::mm::frame::install`]) —
 /// иначе нечем освобождать (и потеряли бы `cr3`); тогда просто выходим.
@@ -727,11 +739,22 @@ fn switch_to_next() -> bool {
                     Some(n) => {
                         sched.current = n;
                         let old_rsp: *mut u64 = &mut sched.threads[cur].rsp;
+                        // Указатели на области FPU (сырые — borrow завершится сразу, как у old_rsp).
+                        let old_fpu: *mut context::FpuArea = &mut *sched.threads[cur].fpu;
                         let new_rsp = sched.threads[n].rsp;
                         let next_cr3 = sched.threads[n].cr3.unwrap_or(sched.kernel_cr3);
                         let next_rsp0 = sched.threads[n].kernel_stack_top;
                         let next_fs_base = sched.threads[n].fs_base;
-                        Some((old_rsp, new_rsp, next_cr3, next_rsp0, next_fs_base))
+                        let next_fpu: *const context::FpuArea = &*sched.threads[n].fpu;
+                        Some((
+                            old_rsp,
+                            new_rsp,
+                            next_cr3,
+                            next_rsp0,
+                            next_fs_base,
+                            old_fpu,
+                            next_fpu,
+                        ))
                     }
                     None => {
                         // Других готовых нет. Если текущий жив — просто не переключаемся;
@@ -749,13 +772,24 @@ fn switch_to_next() -> bool {
     };
 
     match switch {
-        Some((old_rsp, new_rsp, next_cr3, next_rsp0, next_fs_base)) => {
+        Some((old_rsp, new_rsp, next_cr3, next_rsp0, next_fs_base, old_fpu, next_fpu)) => {
             // SAFETY: прерывания выключены; указатели — из валидных контекстов потоков;
             // память ядра отображена в каждом адресном пространстве, поэтому переключение
             // (стеки/таблицы ядра) корректно и через смену CR3. Между отпусканием замка и
             // записью `*old_rsp` (начало switch_context) никакой код Vec не перелокует —
-            // IF=0. `next_fs_base` каноничен (его проверил arch_prctl).
-            unsafe { context::switch_task(old_rsp, new_rsp, next_cr3, next_rsp0, next_fs_base) };
+            // IF=0. `next_fs_base` каноничен (его проверил arch_prctl); `old_fpu`/`next_fpu` —
+            // живые области FPU потоков (в `Thread`).
+            unsafe {
+                context::switch_task(
+                    old_rsp,
+                    new_rsp,
+                    next_cr3,
+                    next_rsp0,
+                    next_fs_base,
+                    old_fpu,
+                    next_fpu,
+                )
+            };
             true
         }
         None => false,
