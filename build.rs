@@ -136,7 +136,87 @@ fn main() {
         println!("cargo:rustc-env={env}={}", elf.display());
     }
 
+    build_c_programs(&manifest);
     generate_disk_image(&manifest);
+}
+
+/// Собирает пользовательские программы на **C** (M9g) — доказательство, что обычный C-код,
+/// собранный clang'ом, запускается на ferros. Свободностоящие (без libc/crt0); линкуются нашим
+/// `user/hello/linker.ld` (та же база и `ENTRY(_start)`, что у Rust-программ). Это фундамент под
+/// будущий порт libc, поэтому **clang теперь нужен для сборки** (как nightly Rust и QEMU).
+///
+/// Модель кода `large`: пользовательская база `0x7F80_0000_0000` — высокий адрес, в который не
+/// достают 32-битные релокации модели `small` (по умолчанию). Линкуем через драйвер `clang`
+/// (`-fuse-ld=lld`), а не голый `ld.lld`: на Windows его флейвор выбирается по `--target`.
+fn build_c_programs(manifest: &str) {
+    let src = PathBuf::from(manifest).join("user/c/hello.c");
+    let linker = PathBuf::from(manifest).join("user/hello/linker.ld");
+    println!("cargo:rerun-if-changed={}", src.display());
+    println!("cargo:rerun-if-changed={}", linker.display());
+
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set for build script");
+    let obj = PathBuf::from(&out_dir).join("hello_c.o");
+    let elf = PathBuf::from(&out_dir).join("hello_c");
+
+    let clang_ok = Command::new("clang")
+        .arg("--version")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(
+        clang_ok,
+        "clang is required to build the C user programs (M9g). Install LLVM/clang and ensure \
+         `clang` is on PATH."
+    );
+
+    // Компиляция: свободностоящая, без PIE, large-модель кода, без red-zone (на user-стеке).
+    let compile = Command::new("clang")
+        .args([
+            "--target=x86_64-unknown-linux-gnu",
+            "-ffreestanding",
+            "-nostdlib",
+            "-fno-pie",
+            "-fno-stack-protector",
+            "-fno-asynchronous-unwind-tables",
+            "-mno-red-zone",
+            "-mcmodel=large",
+            "-O2",
+            "-c",
+        ])
+        .arg(&src)
+        .arg("-o")
+        .arg(&obj)
+        .status()
+        .expect("failed to run clang (compile C user program)");
+    assert!(
+        compile.success(),
+        "clang failed to compile {}",
+        src.display()
+    );
+
+    // Линковка: статический ELF по нашему скрипту компоновки (база/точка входа как у Rust-программ).
+    // Скрипт передаём через `-Xlinker -T -Xlinker <путь>` (два отдельных токена), а НЕ `-Wl,-T,<путь>`:
+    // `clang` режет `-Wl,` по запятым, и путь с запятой сломал бы поиск скрипта (пробелы — ок).
+    let link = Command::new("clang")
+        .args([
+            "--target=x86_64-unknown-linux-gnu",
+            "-nostdlib",
+            "-static",
+            "-fno-pie",
+            "-fuse-ld=lld",
+            "-Xlinker",
+            "-T",
+            "-Xlinker",
+        ])
+        .arg(&linker)
+        .arg(&obj)
+        .arg("-o")
+        .arg(&elf)
+        .status()
+        .expect("failed to run clang (link C user program)");
+    assert!(link.success(), "clang/lld failed to link {}", elf.display());
+
+    println!("cargo:rustc-env=USER_HELLO_C_ELF={}", elf.display());
 }
 
 /// Имя и содержимое тестового файла в образе. ВАЖНО: те же значения захардкожены в

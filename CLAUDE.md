@@ -54,4 +54,5 @@ cargo run     # build kernel image and launch QEMU
 cargo test    # run integration tests headless in QEMU (from M1 onward)
 ```
 
-Requires: Rust nightly + `rust-src` + `llvm-tools-preview`, `bootimage`, QEMU.
+Requires: Rust nightly + `rust-src` + `llvm-tools-preview`, `bootimage`, QEMU, and
+**`clang` + LLVM `lld`** (`build.rs` compiles the C user programs from M9g on — the C/libc track).

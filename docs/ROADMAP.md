@@ -9,8 +9,9 @@ in `/bin`): keyboard input via `read(0)`, programs launched with arguments
 (`cd`/`pwd`/relative paths). The full Unix-process core (PIDs, `fork`/`execve`/`wait4`,
 basic signals, memory reclamation) and a readable-writable hierarchical FAT32 underpin it.
 **Now on the libc track (M9), prioritized over M8 networking** per the north star (run
-Linux software → libc first): **M9a–M9f done** (`brk`, TLS, `stat`/`fstat`, time, identity+`uname`,
-`writev`/`readv`/`fcntl`) — the libc-facing syscall surface is complete; next is the relibc port.
+Linux software → libc first): **M9a–M9f** built the libc-facing syscall surface (`brk`, TLS,
+`stat`/`fstat`, time, identity+`uname`, `writev`/`readv`/`fcntl`), and **M9g** proved a clang-built
+**C program** runs in ring 3. Next: grow a libc on that path (minimal → relibc).
 
 > **North star (D8):** run the existing **Linux** software ecosystem rather than write a
 > native app ecosystem from scratch. Long-term aim is **ABI-level** compatibility
@@ -122,8 +123,12 @@ Linux software → libc first): **M9a–M9f done** (`brk`, TLS, `stat`/`fstat`, 
     `getppid` (parent PID), `uname` (`struct utsname`: ferros/x86_64).
   - **M9f — `writev`/`readv`/`fcntl`** (done). Vectored I/O (libc buffers output through `writev`),
     reusing `sys_write`/`sys_read` per `iovec`; `fcntl` does `F_DUPFD`/`F_GETFL` + no-op flag cmds.
-    **This completes the libc-facing syscall surface** — next is the relibc port itself (or an
-    empirical "run a static binary and see what it calls" probe).
+    Completes the libc-facing syscall surface.
+  - **M9g — first C program** (done). A clang-compiled freestanding C binary (no libc) runs in
+    ring 3 and makes Linux syscalls — proves the clang→ELF→loader→ring-3 path and the C ABI.
+    `build.rs` now compiles C user programs (`clang -ffreestanding -mcmodel=large` + our linker
+    script), so **clang/lld is a build requirement**. This is the foundation for a libc; next is a
+    minimal libc (then relibc), built up incrementally on this path.
 - **M8 — Networking.** NIC driver (virtio-net / e1000), TCP/IP via `smoltcp`,
   ping, sockets.
 - **M10 — Graphics / GUI (optional, huge).** Framebuffer, compositor, window
