@@ -161,6 +161,7 @@ fn build_c_programs(manifest: &str) {
         c_dir.join("demo.c"),
         c_dir.join("printftest.c"),
         c_dir.join("libcheck.c"),
+        c_dir.join("catfile.c"),
         libc_dir.join("crt0.s"),
         libc_dir.join("libc.c"),
         libc_dir.join("libc.h"),
@@ -233,6 +234,19 @@ fn build_c_programs(manifest: &str) {
         "cargo:rustc-env=USER_LIBCHECK_ELF={}",
         libcheck_elf.display()
     );
+
+    // M9l: программа `catfile` поверх libc — читает реальный файл с диска (open/read/write).
+    let catfile_o = clang_compile_c(
+        &c_dir.join("catfile.c"),
+        &out_dir.join("catfile.o"),
+        &[&inc],
+    );
+    let catfile_elf = clang_link(
+        &[&crt0_o, &libc_o, &catfile_o],
+        &out_dir.join("catfile"),
+        &linker,
+    );
+    println!("cargo:rustc-env=USER_CATFILE_ELF={}", catfile_elf.display());
 }
 
 /// Общие флаги компиляции C для пользовательского таргета ferros (см. [`build_c_programs`]).

@@ -16,6 +16,15 @@ void exit(int code) __attribute__((noreturn));
 ssize_t write(int fd, const void *buf, size_t n);
 ssize_t read(int fd, void *buf, size_t n);
 
+/* Открыть/закрыть файл (сисколлы open/close). `open` возвращает дескриптор (≥0) или -errno. */
+int open(const char *path, int flags);
+int close(int fd);
+
+/* Флаги доступа open(2) (значения как в Linux). */
+#define O_RDONLY 0
+#define O_WRONLY 1
+#define O_RDWR 2
+
 /* Куча поверх brk: bump-аллокатор (free пока без переиспользования — см. HARDENING). */
 void *malloc(size_t n);
 void free(void *p);
