@@ -54,3 +54,9 @@ pub fn rmdir(path: &str) -> Result<(), fat::FatError> {
     let volume = fat::Fat32::mount()?;
     volume.rmdir(path)
 }
+
+/// Метаданные пути (тип/размер/первый кластер) для `stat` (M9c).
+pub fn stat(path: &str) -> Result<fat::Metadata, fat::FatError> {
+    let volume = fat::Fat32::mount()?;
+    volume.stat(path)
+}

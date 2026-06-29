@@ -122,6 +122,11 @@ path = "src/brktest.rs"
 name = "tlstest"
 path = "src/tlstest.rs"
 
+# Проверка stat/fstat (M9c): метаданные файла/каталога/дескриптора. Встраивается в ядро.
+[[bin]]
+name = "stattest"
+path = "src/stattest.rs"
+
 # panic=abort: у нас нет раскрутки стека в no_std-программе (и таргет тоже abort).
 [profile.dev]
 panic = "abort"

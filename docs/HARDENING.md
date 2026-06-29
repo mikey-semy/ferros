@@ -366,6 +366,15 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   them stay allocated until the address space is torn down on `exit`. Fine for the typical
   grow-mostly malloc pattern; a workload that repeatedly grows and shrinks a large heap would
   accrete page-table frames.
+- **`stat` is a thin synthesis, not real metadata (M9c).** Timestamps (`st_atime`/`mtime`/`ctime`)
+  are all 0 — we have no clock yet (M9d); FAT does store a mtime we don't read. `st_ino` is the
+  file's first cluster, which is **0 for empty files** (so not unique, and `stat`/`fstat` can
+  disagree — `fstat` reports `st_ino=0` always since the open-file table doesn't keep the cluster).
+  `st_uid`/`st_gid`/`st_rdev` are 0, `st_mode` permission bits are a fixed 0644/0755 (no real
+  permissions). `lstat` == `stat` (no symlinks). `fstat` on a regular file reports the in-memory
+  buffer length, not the on-disk size (they differ for an unflushed dirty file). `st_nlink` is a
+  fixed 1/2. Good enough for "does it exist / how big / is it a tty / a dir", not for tooling that
+  relies on times, inodes, or link counts.
 - **`arch_prctl` is FS-only, no GS, single-thread TLS (M9b).** `ARCH_SET_FS`/`ARCH_GET_FS` work;
   `ARCH_SET_GS`/`ARCH_GET_GS` return `-EINVAL` (the kernel will want GS for per-CPU once SMP lands,
   so user GS-base needs care then). There's one thread per process, so "thread-local" is really
