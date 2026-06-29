@@ -19,6 +19,7 @@
 //! `write`), `open` выдаёт fd ≥ 3.
 
 use super::{abi, uaccess};
+use crate::drivers::{serial, vga};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -27,8 +28,6 @@ use x86_64::instructions::interrupts;
 
 /// Верхняя граница числа дескрипторов на процесс.
 const MAX_FDS: usize = 16;
-/// Первый выдаваемый `open` дескриптор (0/1/2 — stdin/stdout/stderr).
-const FIRST_FD: usize = 3;
 
 // Whence для `lseek` (Linux).
 const SEEK_SET: u64 = 0;
@@ -54,14 +53,30 @@ struct OpenFile {
     is_dir: bool,
 }
 
+/// Куда направлен файловый дескриптор (M7g1). Раньше fd 0/1/2 были захардкожены в `read`/`write`;
+/// теперь они — обычные записи таблицы с подложкой `Console`/`Vga`/`Serial`, поэтому их можно
+/// **перенаправить** (`dup2`, редиректы shell): открыть файл и `dup2` его на fd 1 — и `write(1)`
+/// пойдёт в файл, а не на экран. `Clone` — для `fork`/`dup2` (копия подложки).
+#[derive(Clone)]
+enum Fd {
+    /// stdin: блокирующее построчное чтение с консоли; `write` — `-EBADF`.
+    Console,
+    /// stdout: запись на экран (VGA); `read` — `-EBADF`.
+    Vga,
+    /// stderr: запись в serial; `read` — `-EBADF`.
+    Serial,
+    /// Обычный файл или каталог на диске.
+    File(OpenFile),
+}
+
 /// Состояние процесса в файловом слое: таблица дескрипторов и текущий рабочий каталог (M7c).
 /// `Clone` — для `fork` (ребёнок получает независимую копию обоих). Живёт в [`PROCESSES`] под
 /// ключом CR3, поэтому cwd сам наследуется при `fork` ([`fork_fds`]), переживает `execve`
 /// ([`rekey_process`]) и убирается на `exit` ([`forget_process`]) — теми же хуками, что и fd.
 #[derive(Clone)]
 struct ProcState {
-    /// Таблица открытых файлов (индекс = fd).
-    fds: Vec<Option<OpenFile>>,
+    /// Таблица дескрипторов (индекс = fd). По умолчанию заполнена стандартными потоками 0/1/2.
+    fds: Vec<Option<Fd>>,
     /// Текущий рабочий каталог — нормализованный абсолютный путь (всегда с ведущим `/`).
     cwd: String,
 }
@@ -69,7 +84,8 @@ struct ProcState {
 impl Default for ProcState {
     fn default() -> Self {
         ProcState {
-            fds: Vec::new(),
+            // Стандартные потоки: 0=stdin (консоль), 1=stdout (VGA), 2=stderr (serial).
+            fds: alloc::vec![Some(Fd::Console), Some(Fd::Vga), Some(Fd::Serial)],
             cwd: String::from("/"), // новый процесс стартует в корне
         }
     }
@@ -79,10 +95,41 @@ impl Default for ProcState {
 static PROCESSES: Mutex<BTreeMap<u64, ProcState>> = Mutex::new(BTreeMap::new());
 
 /// Забывает таблицу дескрипторов завершённого процесса (по физ. адресу его PML4). Зовёт
-/// reaper (M6e3) при освобождении процесса. Теперь это не просто уборка, а **корректность**:
-/// фрейм PML4 переиспользуется (M6e1), и новый процесс не должен унаследовать чужие fd.
+/// reaper (M6e3) при освобождении процесса. Это **корректность**: фрейм PML4 переиспользуется
+/// (M6e1), и новый процесс не должен унаследовать чужие fd. Грязные файлы к этому моменту уже
+/// сброшены — нормальный `exit` делает это синхронно ([`flush_current_process`]).
 pub fn forget_process(cr3_phys: u64) {
     PROCESSES.lock().remove(&cr3_phys);
+}
+
+/// Сбрасывает на диск незакрытые грязные файлы ТЕКУЩЕГО процесса — зовётся из обработчика `exit`
+/// ДО завершения (M7g1). Нужно, чтобы перенаправленный вывод (`> файл`, который программа не
+/// закрывает) был **durable к моменту, когда родитель вернётся из `wait`** — иначе следующая
+/// команда (`cat файл`) могла бы прочитать ещё не сброшенный файл. Делается синхронно на ядровом
+/// стеке процесса (как `close`), а не лениво в reaper'е. Грязное снимаем под замком, пишем — без
+/// него; `dirty` гасим, чтобы не сбросить повторно. Сбой записи игнорируем — процесс завершается.
+pub fn flush_current_process() {
+    let key = current_key();
+    let dirty: Vec<(String, Vec<u8>)> = {
+        let mut procs = PROCESSES.lock();
+        match procs.get_mut(&key) {
+            Some(state) => state
+                .fds
+                .iter_mut()
+                .filter_map(|slot| match slot {
+                    Some(Fd::File(f)) if f.writable && f.dirty => {
+                        f.dirty = false;
+                        Some((f.name.clone(), f.data.clone()))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            None => Vec::new(),
+        }
+    };
+    for (name, data) in dirty {
+        let _ = crate::fs::write_file(&name, &data);
+    }
 }
 
 /// (Диагностика/тесты) Сколько процессов сейчас имеют таблицу дескрипторов.
@@ -128,7 +175,7 @@ fn with_current_proc<R>(f: impl FnOnce(&mut ProcState) -> R) -> R {
 }
 
 /// Выполняет `f` над таблицей дескрипторов текущего процесса (через [`with_current_proc`]).
-fn with_current_fds<R>(f: impl FnOnce(&mut Vec<Option<OpenFile>>) -> R) -> R {
+fn with_current_fds<R>(f: impl FnOnce(&mut Vec<Option<Fd>>) -> R) -> R {
     with_current_proc(|p| f(&mut p.fds))
 }
 
@@ -173,19 +220,17 @@ fn normalize(path: &str) -> String {
     out
 }
 
-/// Кладёт открытый файл в первый свободный дескриптор ≥ [`FIRST_FD`]. Возвращает fd или
-/// `-EMFILE`, если таблица полна.
-fn alloc_fd(fds: &mut Vec<Option<OpenFile>>, file: OpenFile) -> i64 {
-    while fds.len() < FIRST_FD {
-        fds.push(None);
-    }
-    match (FIRST_FD..fds.len()).find(|&i| fds[i].is_none()) {
+/// Кладёт подложку в **наименьший свободный** дескриптор (POSIX). 0/1/2 по умолчанию заняты
+/// стандартными потоками, поэтому `open` обычно отдаёт fd ≥ 3 — но если процесс закрыл стандартный
+/// поток, его номер переиспользуется. Возвращает fd или `-EMFILE`, если таблица полна.
+fn alloc_fd(fds: &mut Vec<Option<Fd>>, entry: Fd) -> i64 {
+    match (0..fds.len()).find(|&i| fds[i].is_none()) {
         Some(i) => {
-            fds[i] = Some(file);
+            fds[i] = Some(entry);
             i as i64
         }
         None if fds.len() < MAX_FDS => {
-            fds.push(Some(file));
+            fds.push(Some(entry));
             (fds.len() - 1) as i64
         }
         None => -abi::EMFILE,
@@ -216,6 +261,7 @@ pub fn sys_open(path_ptr: u64, flags: u64) -> i64 {
     let writable = (flags & abi::O_ACCMODE) != abi::O_RDONLY;
     let create = flags & abi::O_CREAT != 0;
     let truncate = flags & abi::O_TRUNC != 0;
+    let append = flags & abi::O_APPEND != 0;
 
     // Узнаём, файл это или каталог (или чего нет). Один проход по ФС.
     let open_file = match crate::fs::lookup(path) {
@@ -231,8 +277,9 @@ pub fn sys_open(path_ptr: u64, flags: u64) -> i64 {
             };
             OpenFile {
                 name: String::from(path),
+                // O_APPEND: позиция в конце — записи дописываются (для `>>`).
+                offset: if append { data.len() } else { 0 },
                 data,
-                offset: 0,
                 writable,
                 dirty: false,
                 is_dir: false,
@@ -270,7 +317,7 @@ pub fn sys_open(path_ptr: u64, flags: u64) -> i64 {
         Err(e) => return -fat_errno(e),
     };
 
-    with_current_fds(|fds| alloc_fd(fds, open_file))
+    with_current_fds(|fds| alloc_fd(fds, Fd::File(open_file)))
 }
 
 /// `chdir(path)` (M7c): меняет текущий рабочий каталог процесса. Путь резолвится от cwd и должен
@@ -327,12 +374,11 @@ pub fn sys_getdents64(fd: u64, buf: u64, count: u64) -> i64 {
     let count = count as usize;
     with_current_fds(|fds| {
         let file = match fds.get_mut(fd).and_then(|slot| slot.as_mut()) {
-            Some(f) => f,
+            Some(Fd::File(f)) if f.is_dir => f,
+            Some(Fd::File(_)) => return -abi::ENOTDIR, // обычный файл — не каталог
+            Some(_) => return -abi::ENOTDIR,           // консоль/устройство — не каталог
             None => return -abi::EBADF,
         };
-        if !file.is_dir {
-            return -abi::ENOTDIR;
-        }
         let data = &file.data;
         // Набираем целые записи (длина каждой — в d_reclen, поле u16 по смещению +16) от курсора.
         let mut span = 0usize;
@@ -388,70 +434,112 @@ fn serialize_dirents(items: &[crate::fs::fat::DirItem]) -> Vec<u8> {
     out
 }
 
-/// `write(fd, buf, count)` в обычный файл (fd ≥ 3, M6g3): копирует `count` байт из памяти
-/// пользователя в буфер файла с текущей позиции (расширяя его при необходимости), сдвигает
-/// позицию и помечает файл «грязным» (сбросится на диск при `close`). `-EBADF`, если дескриптор
-/// неверен или открыт только на чтение.
-pub fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
+/// `write(fd, buf, count)` (M7g1): диспетчеризуется по подложке дескриптора — `Vga`/`Serial` пишут
+/// на устройство, `File` (на запись, не каталог) — в буфер файла (write-back). `-EBADF`, если
+/// дескриптор закрыт / только на чтение / каталог. `user_rsp` — для тестовой наблюдаемости.
+pub fn sys_write(fd: u64, buf: u64, count: u64, user_rsp: u64) -> i64 {
     let fd = fd as usize;
-    with_current_fds(|fds| {
-        let file = match fds.get_mut(fd).and_then(|slot| slot.as_mut()) {
-            Some(f) => f,
-            None => return -abi::EBADF,
-        };
-        if !file.writable {
-            return -abi::EBADF;
-        }
-        // Копируем из памяти пользователя в буфер файла (uaccess сам проверит диапазон).
-        match uaccess::with_user_bytes(buf, count, |bytes| {
-            let end = file.offset + bytes.len();
-            if end > file.data.len() {
-                file.data.resize(end, 0);
+    // Тип подложки — под коротким замком; устройство пишем уже без него.
+    enum Kind {
+        Vga,
+        Serial,
+        File,
+        NotWritable,
+        Bad,
+    }
+    let kind = with_current_fds(|fds| match fds.get(fd).and_then(|s| s.as_ref()) {
+        Some(Fd::Vga) => Kind::Vga,
+        Some(Fd::Serial) => Kind::Serial,
+        Some(Fd::File(f)) if f.writable && !f.is_dir => Kind::File,
+        Some(_) => Kind::NotWritable, // консоль (read-only), файл без записи, каталог
+        None => Kind::Bad,
+    });
+    match kind {
+        Kind::Bad | Kind::NotWritable => -abi::EBADF,
+        Kind::Vga => write_device(fd as u64, buf, count, user_rsp, vga::write_bytes),
+        Kind::Serial => write_device(fd as u64, buf, count, user_rsp, serial::write_bytes),
+        Kind::File => with_current_fds(|fds| {
+            let Some(Fd::File(file)) = fds.get_mut(fd).and_then(|s| s.as_mut()) else {
+                return -abi::EBADF; // не должно меняться при IF=0, но перепроверяем
+            };
+            // Копируем из памяти пользователя в буфер файла (uaccess сам проверит диапазон).
+            match uaccess::with_user_bytes(buf, count, |bytes| {
+                let end = file.offset + bytes.len();
+                if end > file.data.len() {
+                    file.data.resize(end, 0);
+                }
+                file.data[file.offset..end].copy_from_slice(bytes);
+                file.offset = end;
+                file.dirty = true;
+                bytes.len() as i64
+            }) {
+                Ok(written) => written,
+                Err(errno) => -errno,
             }
-            file.data[file.offset..end].copy_from_slice(bytes);
-            file.offset = end;
-            file.dirty = true;
-            bytes.len() as i64
-        }) {
-            Ok(written) => written,
-            Err(errno) => -errno,
-        }
-    })
+        }),
+    }
 }
 
-/// `read(fd, buf, count)` — копирует до `count` байт в буфер пользователя. `fd == 0` (stdin,
-/// M7a) читает с консоли (блокируется до строки); `fd ≥ 3` — из открытого файла с текущей
-/// позиции (сдвигая её). Возвращает число прочитанных байт (0 — конец файла).
-pub fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
-    if fd == 0 {
-        return read_stdin(buf, count);
+/// Пишет байты пользователя на устройство (VGA/serial) и фиксирует наблюдаемость для тестов
+/// (M5b: `LAST_WRITE_*`). `-EFAULT`, если буфер пользователя недоступен.
+fn write_device(fd: u64, buf: u64, count: u64, user_rsp: u64, sink: fn(&[u8])) -> i64 {
+    match uaccess::with_user_bytes(buf, count, |bytes| {
+        sink(bytes);
+        crate::syscall::record_write(fd, bytes, user_rsp);
+        bytes.len() as i64
+    }) {
+        Ok(written) => written,
+        Err(errno) => -errno,
     }
+}
+
+/// `read(fd, buf, count)` (M7g1): диспетчеризуется по подложке. `Console` (stdin) блокируется до
+/// строки (M7a); `File` читает с текущей позиции, сдвигая её. `Vga`/`Serial` — `-EBADF` (только
+/// запись). Возвращает число прочитанных байт (0 — конец файла).
+pub fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
     let fd = fd as usize;
-    let count = count as usize;
-    with_current_fds(|fds| {
-        let file = match fds.get_mut(fd).and_then(|slot| slot.as_mut()) {
-            Some(f) => f,
-            None => return -abi::EBADF,
-        };
-        if file.is_dir {
-            // Каталог нельзя читать как файл — листинг идёт через getdents64.
-            return -abi::EISDIR;
+    // Тип подложки определяем под коротким замком: блокирующее чтение консоли держать замок
+    // `PROCESSES` нельзя (оно уступает CPU).
+    enum Kind {
+        Console,
+        File,
+        NotReadable,
+        Bad,
+    }
+    let kind = with_current_fds(|fds| match fds.get(fd).and_then(|s| s.as_ref()) {
+        Some(Fd::Console) => Kind::Console,
+        Some(Fd::File(_)) => Kind::File,
+        Some(_) => Kind::NotReadable, // Vga/Serial — только запись
+        None => Kind::Bad,
+    });
+    match kind {
+        Kind::Console => read_stdin(buf, count),
+        Kind::Bad | Kind::NotReadable => -abi::EBADF,
+        Kind::File => {
+            let count = count as usize;
+            with_current_fds(|fds| {
+                let Some(Fd::File(file)) = fds.get_mut(fd).and_then(|s| s.as_mut()) else {
+                    return -abi::EBADF; // при IF=0 не меняется, но перепроверяем
+                };
+                if file.is_dir {
+                    // Каталог нельзя читать как файл — листинг идёт через getdents64.
+                    return -abi::EISDIR;
+                }
+                // Позиция могла уйти ЗА конец файла (`lseek` разрешает) — тогда читаем 0 (EOF),
+                // а не уходим в переполнение `len - offset`. `start` зажат в пределах файла.
+                let len = file.data.len();
+                let start = file.offset.min(len);
+                let n = (len - start).min(count);
+                match uaccess::copy_to_user(buf, &file.data[start..start + n]) {
+                    Ok(()) => {
+                        file.offset += n;
+                        n as i64
+                    }
+                    Err(errno) => -errno,
+                }
+            })
         }
-        // Позиция могла уйти ЗА конец файла (`lseek` это разрешает) — тогда читаем 0 (EOF),
-        // а не уходим в переполнение `len - offset`. `start` зажат в пределах файла.
-        let len = file.data.len();
-        let start = file.offset.min(len);
-        let n = (len - start).min(count);
-        // Копируем срез файла в память пользователя ДО сдвига позиции (срез заимствует
-        // file.data; заём кончается с вызовом, дальше можно менять offset).
-        match uaccess::copy_to_user(buf, &file.data[start..start + n]) {
-            Ok(()) => {
-                file.offset += n;
-                n as i64
-            }
-            Err(errno) => -errno,
-        }
-    })
+    }
 }
 
 /// `read(0, buf, count)` со stdin (M7a): отдаёт пользователю ввод с консоли построчно. Если
@@ -532,26 +620,61 @@ fn fat_errno(e: crate::fs::fat::FatError) -> i64 {
 /// вывода. `-EBADF` на неверном дескрипторе; `-EIO`/`-ENOSPC`, если сброс на диск не удался.
 pub fn sys_close(fd: u64) -> i64 {
     let fd = fd as usize;
-    // Изымаем открытый файл из таблицы дескрипторов (слот освобождается).
-    let file = with_current_fds(|fds| fds.get_mut(fd).and_then(|slot| slot.take()));
-    let file = match file {
-        Some(f) => f,
-        None => return -abi::EBADF,
-    };
-    if file.writable && file.dirty {
-        if let Err(e) = crate::fs::write_file(&file.name, &file.data) {
-            return -fat_errno(e);
+    // Изымаем подложку из таблицы дескрипторов (слот освобождается).
+    let entry = with_current_fds(|fds| fds.get_mut(fd).and_then(|slot| slot.take()));
+    match entry {
+        None => -abi::EBADF,
+        Some(Fd::File(file)) => {
+            if file.writable && file.dirty {
+                if let Err(e) = crate::fs::write_file(&file.name, &file.data) {
+                    return -fat_errno(e);
+                }
+            }
+            0
         }
+        Some(_) => 0, // консоль/устройство — закрывать на диске нечего
     }
-    0
 }
 
-/// `lseek(fd, offset, whence)` — двигает позицию чтения; возвращает новую позицию.
+/// `dup2(oldfd, newfd)` (M7g1): направляет `newfd` на ту же подложку, что и `oldfd` (закрывая
+/// прежний `newfd`). Основа редиректов: `open(файл)` → `dup2(fd, 1)` — и `write(1)` идёт в файл.
+/// `-EBADF`, если `oldfd` закрыт или `newfd` вне диапазона. Возвращает `newfd`.
+///
+/// Подложка **копируется** (не разделяется): для `File` это отдельная копия буфера/позиции — не
+/// полноценное «общее описание файла» Unix, но для редиректов (open→dup2→close) достаточно; см.
+/// HARDENING. Прежний `newfd`, если был грязным файлом, при этом теряет несброшенные данные.
+pub fn sys_dup2(oldfd: u64, newfd: u64) -> i64 {
+    let oldfd = oldfd as usize;
+    let newfd = newfd as usize;
+    if newfd >= MAX_FDS {
+        return -abi::EBADF;
+    }
+    with_current_proc(|p| {
+        let fds = &mut p.fds;
+        // oldfd должен быть открыт.
+        if fds.get(oldfd).and_then(|s| s.as_ref()).is_none() {
+            return -abi::EBADF;
+        }
+        if oldfd == newfd {
+            return newfd as i64;
+        }
+        let dup = fds[oldfd].clone();
+        while fds.len() <= newfd {
+            fds.push(None);
+        }
+        fds[newfd] = dup;
+        newfd as i64
+    })
+}
+
+/// `lseek(fd, offset, whence)` — двигает позицию чтения файла; возвращает новую позицию.
+/// `-ESPIPE` на консоли/устройстве (не позиционируются).
 pub fn sys_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
     let fd = fd as usize;
     with_current_fds(|fds| {
         let file = match fds.get_mut(fd).and_then(|slot| slot.as_mut()) {
-            Some(f) => f,
+            Some(Fd::File(f)) => f,
+            Some(_) => return -abi::ESPIPE, // консоль/устройство не позиционируется
             None => return -abi::EBADF,
         };
         let base = match whence {

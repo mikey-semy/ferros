@@ -24,7 +24,6 @@ pub mod elf;
 pub mod files;
 pub mod uaccess;
 
-use crate::drivers::{serial, vga};
 use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 // --- Наблюдаемость для тестов M5b (последний обработанный write/exit) ---
@@ -57,10 +56,11 @@ pub static USER_FAULT_KILLS: AtomicU64 = AtomicU64::new(0);
 /// (≥0 — успех, отрицательное — `-errno`). Для `exit` НЕ возвращается (поток завершается).
 pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
     match nr {
-        abi::SYS_WRITE => sys_write(args[0], args[1], args[2], user_rsp),
+        abi::SYS_WRITE => files::sys_write(args[0], args[1], args[2], user_rsp),
         abi::SYS_OPEN => files::sys_open(args[0], args[1]),
         abi::SYS_READ => files::sys_read(args[0], args[1], args[2]),
         abi::SYS_CLOSE => files::sys_close(args[0]),
+        abi::SYS_DUP2 => files::sys_dup2(args[0], args[1]),
         abi::SYS_GETDENTS64 => files::sys_getdents64(args[0], args[1], args[2]),
         abi::SYS_LSEEK => files::sys_lseek(args[0], args[1] as i64, args[2]),
         abi::SYS_CHDIR => files::sys_chdir(args[0]),
@@ -70,6 +70,9 @@ pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
         abi::SYS_WAIT4 => sys_wait4(args[0] as i64, args[1]),
         abi::SYS_KILL => sys_kill(args[0] as i64, args[1]),
         abi::SYS_EXIT | abi::SYS_EXIT_GROUP => {
+            // Сбрасываем незакрытые грязные файлы СИНХРОННО, пока процесс ещё жив (M7g1): иначе
+            // перенаправленный вывод не был бы durable к возврату родителя из `wait`.
+            files::flush_current_process();
             let status = args[0] as i32;
             LAST_EXIT_CODE.store(status as i64, Ordering::SeqCst);
             EXIT_CODE_SUM.fetch_add(status as i64, Ordering::SeqCst);
@@ -126,30 +129,9 @@ fn sys_kill(pid: i64, sig: u64) -> i64 {
     }
 }
 
-/// `write(fd, buf, count)`: пишет `count` байт из пользовательского буфера `buf` в `fd`.
-/// Поддержаны `fd=1` (stdout → VGA) и `fd=2` (stderr → serial); прочее → `-EBADF`.
-/// Возвращает число записанных байт или `-errno`.
-fn sys_write(fd: u64, buf: u64, count: u64, user_rsp: u64) -> i64 {
-    // Куда выводим — решаем по fd ДО чтения памяти пользователя. fd 1/2 — консоль; прочие
-    // (обычные файлы, fd ≥ 3) обслуживает файловый слой (M6g3).
-    let sink: fn(&[u8]) = match fd {
-        1 => vga::write_bytes,
-        2 => serial::write_bytes,
-        _ => return files::sys_write(fd, buf, count),
-    };
-
-    match uaccess::with_user_bytes(buf, count, |bytes| {
-        sink(bytes);
-        record_write(fd, bytes, user_rsp);
-        bytes.len() as i64
-    }) {
-        Ok(written) => written,
-        Err(errno) => -errno,
-    }
-}
-
-/// Фиксирует параметры `write` для тестовой наблюдаемости (см. статики выше).
-fn record_write(fd: u64, bytes: &[u8], user_rsp: u64) {
+/// Фиксирует параметры `write` для тестовой наблюдаемости (см. статики выше). Зовётся файловым
+/// слоем при записи на устройство (stdout/stderr) — вся диспетчеризация `write` теперь там (M7g1).
+pub(crate) fn record_write(fd: u64, bytes: &[u8], user_rsp: u64) {
     LAST_WRITE_FD.store(fd, Ordering::SeqCst);
     LAST_WRITE_LEN.store(bytes.len() as u64, Ordering::SeqCst);
     LAST_WRITE_SUM.store(bytes.iter().map(|&b| b as u64).sum(), Ordering::SeqCst);

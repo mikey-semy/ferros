@@ -17,12 +17,22 @@ use core::ptr;
 
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
+const SYS_OPEN: u64 = 2;
+const SYS_CLOSE: u64 = 3;
+const SYS_DUP2: u64 = 33;
 const SYS_FORK: u64 = 57;
 const SYS_EXECVE: u64 = 59;
 const SYS_EXIT: u64 = 60;
 const SYS_WAIT4: u64 = 61;
 const SYS_GETCWD: u64 = 79;
 const SYS_CHDIR: u64 = 80;
+
+// Флаги open(2) для редиректов.
+const O_RDONLY: u64 = 0;
+const O_WRONLY: u64 = 0o1;
+const O_CREAT: u64 = 0o100;
+const O_TRUNC: u64 = 0o1000;
+const O_APPEND: u64 = 0o2000;
 
 /// Максимум слов в команде (argv), включая место под завершающий `NULL`.
 const MAX_ARGS: usize = 16;
@@ -208,6 +218,91 @@ fn tokenize(buf: &mut [u8], n: usize, argv: &mut [*const u8; MAX_ARGS]) -> usize
     argc
 }
 
+/// Редиректы команды (M7g1): куда направить stdin/stdout. Пустой путь (`null`) — без редиректа.
+struct Redirects {
+    /// Файл для stdin (`< файл`) или `null`.
+    in_path: *const u8,
+    /// Файл для stdout (`> файл` / `>> файл`) или `null`.
+    out_path: *const u8,
+    /// Дописывать (`>>`) вместо перезаписи (`>`).
+    append: bool,
+}
+
+/// Вынимает из `argv` операторы редиректа `<`/`>`/`>>` и их цели, складывая прочие слова в
+/// `clean` (с завершающим `NULL`). Возвращает число слов в `clean` и сами редиректы. Оператор
+/// без следующей цели игнорируется. Операторы должны быть отдельными словами (вокруг — пробелы).
+fn parse_redirects(
+    argv: &[*const u8; MAX_ARGS],
+    argc: usize,
+    clean: &mut [*const u8; MAX_ARGS],
+) -> (usize, Redirects) {
+    let mut clean_argc = 0;
+    let mut redir = Redirects {
+        in_path: ptr::null(),
+        out_path: ptr::null(),
+        append: false,
+    };
+    let mut i = 0;
+    while i < argc {
+        let tok = argv[i];
+        // SAFETY: tok — нуль-терминированное слово в буфере строки.
+        let (out, app, inp) = unsafe {
+            (
+                cstr_eq(tok, b">"),
+                cstr_eq(tok, b">>"),
+                cstr_eq(tok, b"<"),
+            )
+        };
+        if out || app || inp {
+            if i + 1 < argc {
+                let target = argv[i + 1];
+                if inp {
+                    redir.in_path = target;
+                } else {
+                    redir.out_path = target;
+                    redir.append = app;
+                }
+                i += 2;
+            } else {
+                i += 1; // оператор без цели — игнорируем
+            }
+            continue;
+        }
+        clean[clean_argc] = tok;
+        clean_argc += 1;
+        i += 1;
+    }
+    clean[clean_argc] = ptr::null();
+    (clean_argc, redir)
+}
+
+/// Применяет редиректы в ДОЧЕРНЕМ процессе перед `execve`: открывает файлы и `dup2` их на fd 0/1.
+/// При ошибке открытия печатает сообщение и завершает ребёнка кодом 1.
+///
+/// # Safety
+/// Пути нуль-терминированы; вызывать только в ребёнке (меняет его дескрипторы 0/1).
+unsafe fn apply_redirects(redir: &Redirects) {
+    if !redir.in_path.is_null() {
+        let fd = sc3(SYS_OPEN, redir.in_path as u64, O_RDONLY, 0);
+        if fd < 0 {
+            write_str(b"ferros: cannot open input file\n");
+            sys_exit(1);
+        }
+        sc2(SYS_DUP2, fd as u64, 0); // stdin ← файл
+        sc1(SYS_CLOSE, fd as u64);
+    }
+    if !redir.out_path.is_null() {
+        let extra = if redir.append { O_APPEND } else { O_TRUNC };
+        let fd = sc3(SYS_OPEN, redir.out_path as u64, O_WRONLY | O_CREAT | extra, 0);
+        if fd < 0 {
+            write_str(b"ferros: cannot open output file\n");
+            sys_exit(1);
+        }
+        sc2(SYS_DUP2, fd as u64, 1); // stdout → файл
+        sc1(SYS_CLOSE, fd as u64);
+    }
+}
+
 /// Печатает приглашение `<cwd>$ `.
 fn print_prompt() {
     // Под cwd столько же, сколько под строку ввода: иначе глубокий путь дал бы `getcwd` -ERANGE
@@ -244,12 +339,19 @@ pub extern "C" fn _start() -> ! {
             continue; // пустая строка
         }
 
-        // --- Встроенные команды ---
-        // SAFETY: argv[0] — нуль-терминированное слово в нашем буфере.
-        if unsafe { cstr_eq(argv[0], b"exit") } {
-            let code = if argc > 1 {
-                // SAFETY: argv[1] нуль-терминирован.
-                unsafe { atoi(argv[1]) }
+        // Вынимаем редиректы (`<`/`>`/`>>` + цели); в `cmd_argv` остаётся команда с аргументами.
+        let mut cmd_argv = [ptr::null::<u8>(); MAX_ARGS];
+        let (cmd_argc, redir) = parse_redirects(&argv, argc, &mut cmd_argv);
+        if cmd_argc == 0 {
+            continue; // только редирект без команды
+        }
+
+        // --- Встроенные команды (редиректы к ним пока не применяются — MVP) ---
+        // SAFETY: cmd_argv[0] — нуль-терминированное слово в нашем буфере.
+        if unsafe { cstr_eq(cmd_argv[0], b"exit") } {
+            let code = if cmd_argc > 1 {
+                // SAFETY: cmd_argv[1] нуль-терминирован.
+                unsafe { atoi(cmd_argv[1]) }
             } else {
                 0
             };
@@ -257,10 +359,10 @@ pub extern "C" fn _start() -> ! {
             unsafe { sys_exit(code as u64) };
         }
         // SAFETY: см. выше.
-        if unsafe { cstr_eq(argv[0], b"cd") } {
+        if unsafe { cstr_eq(cmd_argv[0], b"cd") } {
             // `cd` без аргумента — в корень.
-            let target = if argc > 1 {
-                argv[1] as u64
+            let target = if cmd_argc > 1 {
+                cmd_argv[1] as u64
             } else {
                 b"/\0".as_ptr() as u64
             };
@@ -271,7 +373,7 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
         // SAFETY: см. выше.
-        if unsafe { cstr_eq(argv[0], b"pwd") } {
+        if unsafe { cstr_eq(cmd_argv[0], b"pwd") } {
             let mut cwd = [0u8; 256]; // как и в приглашении — чтобы глубокий cwd не дал -ERANGE
 
             // SAFETY: getcwd в наш буфер.
@@ -283,26 +385,27 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
 
-        // --- Внешняя программа: fork + execve + wait4 ---
+        // --- Внешняя программа: fork + (редиректы) + execve + wait4 ---
         // Голое имя (без `/`) ищем в `/bin`; путь (с `/`) исполняем как есть (ядро резолвит его
         // от cwd). Буфер пути строим ДО fork — ребёнок (копия) унаследует его.
         let mut pathbuf = [0u8; 256];
-        // SAFETY: argv[0] нуль-терминирован; pathbuf — наш буфер.
+        // SAFETY: cmd_argv[0] нуль-терминирован; pathbuf — наш буфер.
         let cmd = unsafe {
-            if has_slash(argv[0]) {
-                argv[0]
+            if has_slash(cmd_argv[0]) {
+                cmd_argv[0]
             } else {
-                build_bin_path(&mut pathbuf, argv[0])
+                build_bin_path(&mut pathbuf, cmd_argv[0])
             }
         };
 
         // SAFETY: fork.
         let pid = unsafe { sc0(SYS_FORK) };
         if pid == 0 {
-            // Ребёнок: заменяем образ на запрошенную программу.
-            // SAFETY: execve с cmd/argv нашей памяти; envp пуст (NULL).
+            // Ребёнок: применяем редиректы (open+dup2 на 0/1), затем заменяем образ.
+            // SAFETY: в ребёнке; cmd/cmd_argv/redir — наша память; envp пуст (NULL).
             unsafe {
-                sc3(SYS_EXECVE, cmd as u64, argv.as_ptr() as u64, 0);
+                apply_redirects(&redir);
+                sc3(SYS_EXECVE, cmd as u64, cmd_argv.as_ptr() as u64, 0);
                 // Сюда — только если execve не удался.
                 write_str(b"ferros: command not found\n");
                 sys_exit(127);
