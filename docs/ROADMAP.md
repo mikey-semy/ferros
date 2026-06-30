@@ -181,6 +181,11 @@ Linux software → libc first): **M9a–M9f** built the libc-facing syscall surf
     resolves `dns.google` → `[tcpdns] dns.google -> 8.8.8.8`. **Both UDP and TCP sockets now work from
     ring 3.** TCP is client-only (no listen/accept), `close` is abrupt (no FIN); scheduler block/wake,
     socket options, and the server side are follow-ups (HARDENING).
+  - **M8f — HTTP client from ring 3** (done, capstone). A ring-3 **C** program (`httpget`, userland
+    only — no new kernel code) does `socket`/`connect`/`send`/`recv` an HTTP/1.0 `GET /` to Cloudflare
+    1.1.1.1:80 and verifies the response starts with `HTTP/1.` → `[httpget] HTTP/1.1 301 Moved
+    Permanently`. Exercises TCP for real (multi-segment response, EOF on peer close). **ferros runs an
+    HTTP client** — networking demonstrated end-to-end as real software uses it.
 - **M10 — Graphics / GUI (optional, huge).** Framebuffer, compositor, window
   manager, toolkit.
 - **M11 — Real hardware.** UEFI boot (migrate off bootloader 0.9), drivers for a
