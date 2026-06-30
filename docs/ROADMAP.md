@@ -158,10 +158,16 @@ Linux software → libc first): **M9a–M9f** built the libc-facing syscall surf
       `icmp` socket (feature `socket-icmp`): sends Echo Requests, counts matching Echo Replies. Tested
       by pinging the SLIRP gateway **10.0.2.2** (SLIRP answers its own gateway's echo internally — no
       host ICMP/internet needed, so the test is deterministic): `[test] ping 10.0.2.2: 3/3 replies`.
-    - **M8d2** — persistent net stack (interface + sockets under a `Mutex`, polled on demand) + a
-      kernel TCP/UDP helper — the foundation a socket syscall needs.
-    - **M8d3** — socket syscall surface for ring 3 (`socket`/`bind`/`connect`/`send`/`recv`…) + a
-      ring-3 demo program. Closes networking onto the north star (Linux software via POSIX sockets).
+    - **M8d2 — UDP socket + DNS resolve** (done). `net::resolve` brings up DHCP, then drives a
+      smoltcp `udp` socket (feature `socket-udp`) — the same `bind`/`send`/`recv` path the ring-3
+      syscalls will wrap. DNS itself (`net::dns`: `build_query`/`parse_first_a`, bounds-safe,
+      handles name compression) is hand-rolled; the full resolver would be reused. Tested by
+      resolving `dns.google` via SLIRP's resolver 10.0.2.3 to one of Google's stable anycast IPs:
+      `[test] dns.google -> 8.8.4.4`. (Needs working host DNS — the accepted trade-off of the UDP
+      path vs. ICMP, where SLIRP itself answered.)
+    - **M8d3** — socket syscall surface for ring 3 (`socket`/`bind`/`connect`/`sendto`/`recvfrom`…) +
+      a ring-3 demo program. Closes networking onto the north star (Linux software via POSIX sockets).
+      Will need a persistent net stack (interface + sockets under a `Mutex`, polled on demand).
 - **M10 — Graphics / GUI (optional, huge).** Framebuffer, compositor, window
   manager, toolkit.
 - **M11 — Real hardware.** UEFI boot (migrate off bootloader 0.9), drivers for a
