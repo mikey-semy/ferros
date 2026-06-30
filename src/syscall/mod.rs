@@ -67,6 +67,7 @@ pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
         // Сокеты (M8d3): аргументы по Linux-ABI; sendto/recvfrom используют r10(flags)=args[3] —
         // его игнорируем, адрес и длина — args[4]/args[5].
         abi::SYS_SOCKET => files::sys_socket(args[0], args[1], args[2]),
+        abi::SYS_CONNECT => files::sys_connect(args[0], args[1], args[2]),
         abi::SYS_BIND => files::sys_bind(args[0], args[1], args[2]),
         abi::SYS_SENDTO => files::sys_sendto(args[0], args[1], args[2], args[4], args[5]),
         abi::SYS_RECVFROM => files::sys_recvfrom(args[0], args[1], args[2], args[4], args[5]),

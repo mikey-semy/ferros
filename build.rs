@@ -164,6 +164,8 @@ fn build_c_programs(manifest: &str) {
         c_dir.join("catfile.c"),
         c_dir.join("ccat.c"),
         c_dir.join("dnsclient.c"),
+        c_dir.join("tcpdns.c"),
+        c_dir.join("dns.h"),
         libc_dir.join("crt0.s"),
         libc_dir.join("libc.c"),
         libc_dir.join("libc.h"),
@@ -268,6 +270,15 @@ fn build_c_programs(manifest: &str) {
         &linker,
     );
     println!("cargo:rustc-env=USER_DNSCLIENT_ELF={}", dns_elf.display());
+
+    // M8e: `tcpdns` — резолвит имя по DNS поверх TCP (socket/connect/send/recv).
+    let tcpdns_o = clang_compile_c(&c_dir.join("tcpdns.c"), &out_dir.join("tcpdns.o"), &[&inc]);
+    let tcpdns_elf = clang_link(
+        &[&crt0_o, &libc_o, &tcpdns_o],
+        &out_dir.join("tcpdns"),
+        &linker,
+    );
+    println!("cargo:rustc-env=USER_TCPDNS_ELF={}", tcpdns_elf.display());
 }
 
 /// Общие флаги компиляции C для пользовательского таргета ferros (см. [`build_c_programs`]).

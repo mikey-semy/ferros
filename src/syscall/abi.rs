@@ -29,6 +29,8 @@ pub const SYS_WRITEV: u64 = 20;
 pub const SYS_FCNTL: u64 = 72;
 /// `socket(domain, type, protocol)` — создать сокет, вернуть дескриптор (M8d3).
 pub const SYS_SOCKET: u64 = 41;
+/// `connect(fd, addr, addrlen)` — установить TCP-соединение с удалённым адресом (M8e).
+pub const SYS_CONNECT: u64 = 42;
 /// `bind(fd, addr, addrlen)` — привязать сокет к локальному адресу/порту (M8d3).
 pub const SYS_BIND: u64 = 49;
 /// `sendto(fd, buf, len, flags, dest_addr, addrlen)` — отправить датаграмму (M8d3).
@@ -165,8 +167,10 @@ pub const O_APPEND: u64 = 0o2000;
 /// Семейство адресов IPv4 (`AF_INET`). `struct sockaddr_in` (16 байт): `sin_family` (u16, порядок
 /// хоста), `sin_port` (u16, сетевой порядок), `sin_addr` (4 байта IPv4), `sin_zero[8]`.
 pub const AF_INET: u64 = 2;
-/// Тип сокета: датаграммы без соединения (`SOCK_DGRAM`, у нас = UDP). Поток (`SOCK_STREAM`) — позже.
+/// Тип сокета: датаграммы без соединения (`SOCK_DGRAM`, у нас = UDP).
 pub const SOCK_DGRAM: u64 = 2;
+/// Тип сокета: надёжный поток с установлением соединения (`SOCK_STREAM`, у нас = TCP) (M8e).
+pub const SOCK_STREAM: u64 = 1;
 /// Размер `struct sockaddr_in` в байтах.
 pub const SOCKADDR_IN_LEN: usize = 16;
 
@@ -235,3 +239,11 @@ pub const EPROTONOSUPPORT: i64 = 93;
 pub const EAFNOSUPPORT: i64 = 97;
 /// Сеть не работает: стек не поднялся (нет NIC / DHCP не настроился, M8d3).
 pub const ENETDOWN: i64 = 100;
+/// Операция не поддержана для этого типа сокета (например `connect` на UDP, M8e).
+pub const EOPNOTSUPP: i64 = 95;
+/// Сокет не подключён (`send`/`recv` на неустановленном TCP, M8e).
+pub const ENOTCONN: i64 = 107;
+/// Истёк таймаут операции (TCP-рукопожатие не завершилось, M8e).
+pub const ETIMEDOUT: i64 = 110;
+/// Соединение отвергнуто удалённой стороной (RST на `connect`, M8e).
+pub const ECONNREFUSED: i64 = 111;
