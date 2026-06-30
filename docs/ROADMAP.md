@@ -152,8 +152,16 @@ Linux software → libc first): **M9a–M9f** built the libc-facing syscall surf
     adapts our driver to `smoltcp::phy::Device`; `net::dhcp_acquire` runs a DHCP client and gets an
     IP. Tested: SLIRP's DHCP server leases the guest **10.0.2.15/24** — proving the whole stack
     (our Device, ARP, UDP, DHCP) works end-to-end.
-  - **M8d** — ICMP ping / TCP sockets (via SLIRP services or a forwarded port), then a socket syscall
-    surface for ring 3.
+  - **M8d** — ICMP ping / TCP sockets, then a socket syscall surface for ring 3. Decomposed:
+    - **M8d1 — ICMP ping** (done). `net::ping` brings up DHCP (refactored into a shared
+      `dhcp_configure` that also sets the interface IP + default route), then drives a `smoltcp`
+      `icmp` socket (feature `socket-icmp`): sends Echo Requests, counts matching Echo Replies. Tested
+      by pinging the SLIRP gateway **10.0.2.2** (SLIRP answers its own gateway's echo internally — no
+      host ICMP/internet needed, so the test is deterministic): `[test] ping 10.0.2.2: 3/3 replies`.
+    - **M8d2** — persistent net stack (interface + sockets under a `Mutex`, polled on demand) + a
+      kernel TCP/UDP helper — the foundation a socket syscall needs.
+    - **M8d3** — socket syscall surface for ring 3 (`socket`/`bind`/`connect`/`send`/`recv`…) + a
+      ring-3 demo program. Closes networking onto the north star (Linux software via POSIX sockets).
 - **M10 — Graphics / GUI (optional, huge).** Framebuffer, compositor, window
   manager, toolkit.
 - **M11 — Real hardware.** UEFI boot (migrate off bootloader 0.9), drivers for a

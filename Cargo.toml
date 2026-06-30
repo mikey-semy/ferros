@@ -49,11 +49,13 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc"]
 # TCP/IP-стек `smoltcp` (M8c). По политике reuse (D13) полноценный стек берём готовый,
 # а сами пишем только драйвер NIC (virtio-net) и тонкий слой `phy::Device` поверх него.
 # `no_std` + `alloc` (SocketSet на Vec), Ethernet + IPv4 + DHCP-клиент. Без std/логирования.
+# `socket-icmp` (M8d) — ICMP-сокет под ping шлюза.
 smoltcp = { version = "0.13", default-features = false, features = [
     "alloc",
     "medium-ethernet",
     "proto-ipv4",
     "socket-dhcpv4",
+    "socket-icmp",
 ] }
 
 # ВАЖНО: только для сборки (build.rs), НЕ для ядра. `build.rs` форматирует тестовый
