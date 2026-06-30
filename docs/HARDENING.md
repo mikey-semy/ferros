@@ -402,6 +402,11 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   is a no-op. Add a per-`FILE` buffer + flush points when performance matters. Also missing: `fseek`/
   `ftell`/`rewind`, `ungetc`, `fscanf`/`scanf`, `freopen`, wide/`%f` formatting, and `size*nmemb`
   overflow checks in `fread`/`fwrite` (matches mainstream libc, but unchecked).
+- **`strtol`/`strtoul` don't detect overflow, no `errno` (M9o).** They accumulate in `unsigned long`
+  with no clamp to `LONG_MAX`/`LONG_MIN`/`ULONG_MAX` and never set `errno = ERANGE` — out-of-range
+  input wraps silently (the libc has no `errno` yet at all). Also no `strtoll`/`strtod`, and `base`
+  outside `{0, 2..36}` is unchecked (UB). Fine for parsing small in-range numbers; a real `strtol`
+  saturates + sets `errno`.
 - **`brk` heap is a fixed region, no `mmap` (M9a).** The process heap is a fixed window
   `[USER_HEAP_BASE, USER_HEAP_MAX)` (1 GiB) that grows up by mapping pages on demand. There is
   **no `mmap`/`munmap`** (anonymous or file-backed), so large/aligned allocations and
