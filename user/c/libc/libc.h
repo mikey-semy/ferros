@@ -25,6 +25,42 @@ int close(int fd);
 #define O_WRONLY 1
 #define O_RDWR 2
 
+/* --- Сокеты (M8d3): подмножество BSD-сокетов поверх сисколлов. Пока только IPv4/UDP. --- */
+
+typedef unsigned short sa_family_t;
+typedef unsigned int socklen_t;
+
+#define AF_INET 2    /* домен: IPv4 */
+#define SOCK_DGRAM 2 /* тип: датаграммы без соединения (UDP) */
+
+/* IPv4-адрес в сетевом порядке байт. */
+struct in_addr {
+    unsigned int s_addr;
+};
+
+/* Адрес IPv4-эндпоинта (16 байт; раскладка как в Linux). `sin_port`/`sin_addr` — сетевой порядок. */
+struct sockaddr_in {
+    sa_family_t sin_family;   /* AF_INET */
+    unsigned short sin_port;  /* порт (htons) */
+    struct in_addr sin_addr;  /* адрес */
+    unsigned char sin_zero[8];
+};
+
+/* Создать сокет: domain=AF_INET, type=SOCK_DGRAM, protocol=0. Возвращает fd (≥0) или -errno. */
+int socket(int domain, int type, int protocol);
+/* Привязать сокет к локальному порту из `addr`. 0 или -errno. */
+int bind(int fd, const struct sockaddr_in *addr, socklen_t addrlen);
+/* Отправить датаграмму на `dst`. Возвращает число байт или -errno. `flags` игнорируется. */
+long sendto(int fd, const void *buf, size_t n, int flags, const struct sockaddr_in *dst,
+            socklen_t dstlen);
+/* Принять датаграмму (блокирующе). Если `src`/`srclen` не NULL — туда адрес отправителя. */
+long recvfrom(int fd, void *buf, size_t n, int flags, struct sockaddr_in *src, socklen_t *srclen);
+
+/* Хост→сеть для 16-битного порта (x86 — little-endian, поэтому переставляем байты). */
+static inline unsigned short htons(unsigned short x) {
+    return (unsigned short)((x << 8) | (x >> 8));
+}
+
 /* Куча поверх brk: bump-аллокатор (free пока без переиспользования — см. HARDENING). */
 void *malloc(size_t n);
 void free(void *p);

@@ -165,9 +165,15 @@ Linux software → libc first): **M9a–M9f** built the libc-facing syscall surf
       resolving `dns.google` via SLIRP's resolver 10.0.2.3 to one of Google's stable anycast IPs:
       `[test] dns.google -> 8.8.4.4`. (Needs working host DNS — the accepted trade-off of the UDP
       path vs. ICMP, where SLIRP itself answered.)
-    - **M8d3** — socket syscall surface for ring 3 (`socket`/`bind`/`connect`/`sendto`/`recvfrom`…) +
-      a ring-3 demo program. Closes networking onto the north star (Linux software via POSIX sockets).
-      Will need a persistent net stack (interface + sockets under a `Mutex`, polled on demand).
+    - **M8d3 — socket syscalls for ring 3** (done). A persistent net stack (`net::socket`: interface +
+      sockets under a `Mutex`, lazy DHCP bring-up, polled on demand), an `Fd::Socket` fd variant
+      (refcounted handle, freed across fork/dup2/close via `Drop`), and the Linux syscalls
+      `socket`(41)/`bind`(49)/`sendto`(44)/`recvfrom`(45) for `AF_INET`/`SOCK_DGRAM`. A ring-3 **C**
+      program (`dnsclient`, over libc `socket`/`sendto`/`recvfrom` wrappers) resolves `dns.google` via
+      SLIRP's DNS → `[dnsclient] dns.google -> 8.8.8.8`. **Networking is now reachable from userspace
+      via the Linux socket ABI** — the north star. (Review caught a real IF=0 hang: syscalls run with
+      interrupts off, so the PIT-derived wall-clock timeout can't fire — the busy-polls are now bounded
+      by a poll count instead. Scheduler block/wake + TCP are follow-ups; see HARDENING.)
 - **M10 — Graphics / GUI (optional, huge).** Framebuffer, compositor, window
   manager, toolkit.
 - **M11 — Real hardware.** UEFI boot (migrate off bootloader 0.9), drivers for a

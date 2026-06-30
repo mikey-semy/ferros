@@ -16,6 +16,7 @@
 //! таймеры повторов) — внутри smoltcp.
 
 mod dns;
+pub mod socket;
 
 use crate::arch::uptime_ns;
 use crate::drivers::virtio_net;
@@ -116,10 +117,17 @@ struct DhcpLease {
     prefix: u8,
 }
 
+/// Предел итераций опроса DHCP — страховка от зависания. Нужен потому, что `dhcp_configure`
+/// зовётся и из сисколла `socket()` (ленивый подъём стека), а там IF=0 и таймер стоит, так что
+/// `deadline` по `uptime_ns` не сработает. Счёт опросов от часов не зависит. Велик с запасом: удачный
+/// DHCP укладывается в тысячи итераций, а это — лишь верхняя граница на случай «сервер не ответил».
+const DHCP_MAX_SPINS: u64 = 200_000_000;
+
 /// Запускает DHCP-клиента на уже поднятом интерфейсе и крутит `poll`, пока не получит конфигурацию
-/// или не истечёт `deadline` (абсолютный аптайм, нс). При успехе **применяет** её к интерфейсу:
-/// ставит наш IP и маршрут по умолчанию (шлюз) — это и есть «настроенная сеть», поверх которой
-/// потом работают ICMP/TCP-сокеты. DHCP-сокет на время добавляется в `sockets` и снимается в конце.
+/// или не выйдет бюджет: `deadline` (абсолютный аптайм, нс — работает, когда IF=1) **или**
+/// [`DHCP_MAX_SPINS`] опросов (страховка, когда часы стоят под IF=0). При успехе **применяет**
+/// конфиг к интерфейсу: ставит наш IP и маршрут по умолчанию (шлюз) — это и есть «настроенная сеть»,
+/// поверх которой работают ICMP/UDP-сокеты. DHCP-сокет на время добавляется в `sockets` и снимается.
 fn dhcp_configure(
     iface: &mut Interface,
     device: &mut VirtioPhy,
@@ -127,10 +135,12 @@ fn dhcp_configure(
     deadline: u64,
 ) -> Option<DhcpLease> {
     let dhcp = sockets.add(dhcpv4::Socket::new());
+    let mut spins = 0u64;
     let lease = loop {
-        if uptime_ns() >= deadline {
+        if uptime_ns() >= deadline || spins >= DHCP_MAX_SPINS {
             break None;
         }
+        spins += 1;
         // poll прогоняет приём/передачу: smoltcp забирает наши RX-кадры и шлёт свои (DISCOVER/REQUEST).
         iface.poll(now(), device, sockets);
         if let Some(dhcpv4::Event::Configured(cfg)) = sockets.get_mut::<dhcpv4::Socket>(dhcp).poll()
