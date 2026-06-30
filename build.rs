@@ -165,6 +165,7 @@ fn build_c_programs(manifest: &str) {
         c_dir.join("ccat.c"),
         c_dir.join("dnsclient.c"),
         c_dir.join("tcpdns.c"),
+        c_dir.join("httpget.c"),
         c_dir.join("dns.h"),
         libc_dir.join("crt0.s"),
         libc_dir.join("libc.c"),
@@ -279,6 +280,19 @@ fn build_c_programs(manifest: &str) {
         &linker,
     );
     println!("cargo:rustc-env=USER_TCPDNS_ELF={}", tcpdns_elf.display());
+
+    // M8f: `httpget` — резолвит example.com по DNS и тянет страницу по HTTP (TCP) из кольца 3.
+    let http_o = clang_compile_c(
+        &c_dir.join("httpget.c"),
+        &out_dir.join("httpget.o"),
+        &[&inc],
+    );
+    let http_elf = clang_link(
+        &[&crt0_o, &libc_o, &http_o],
+        &out_dir.join("httpget"),
+        &linker,
+    );
+    println!("cargo:rustc-env=USER_HTTPGET_ELF={}", http_elf.display());
 }
 
 /// Общие флаги компиляции C для пользовательского таргета ferros (см. [`build_c_programs`]).
