@@ -167,6 +167,7 @@ fn build_c_programs(manifest: &str) {
         c_dir.join("tcpdns.c"),
         c_dir.join("httpget.c"),
         c_dir.join("stdiotest.c"),
+        c_dir.join("wc.c"),
         c_dir.join("dns.h"),
         libc_dir.join("crt0.s"),
         libc_dir.join("libc.c"),
@@ -259,6 +260,11 @@ fn build_c_programs(manifest: &str) {
     // переменную окружения не выставляем — образ диска прочитает ELF из OUT_DIR.
     let ccat_o = clang_compile_c(&c_dir.join("ccat.c"), &out_dir.join("ccat.o"), &[&inc]);
     clang_link(&[&crt0_o, &libc_o, &ccat_o], &out_dir.join("ccat"), &linker);
+
+    // M9r: `wc` — утилита подсчёта строк/слов/байт на C поверх libc (getopt + FILE*). Тоже на диск
+    // в /BIN (см. generate_disk_image), shell запускает как coreutil; env-переменную не выставляем.
+    let wc_o = clang_compile_c(&c_dir.join("wc.c"), &out_dir.join("wc.o"), &[&inc]);
+    clang_link(&[&crt0_o, &libc_o, &wc_o], &out_dir.join("wc"), &linker);
 
     // M8d3: `dnsclient` — резолвит имя по DNS через сокет-сисколлы (socket/sendto/recvfrom).
     let dns_o = clang_compile_c(
@@ -393,8 +399,8 @@ const FAT_TEST_CONTENT: &[u8] = b"ferros M6c: hello from FAT32!\n";
 /// v4: каталог SUB + SUB/INSIDE.TXT (M7c); v5: каталог /BIN с coreutils (M7f); v6: cat читает
 /// stdin (M7g1) — нужен новый бинарь /BIN/CAT; v7: свежий образ (тесты редиректов пишут в /SUB,
 /// чтобы не переполнять корневой каталог — у FAT нет роста каталога); v8: /BIN/RM + /BIN/RMDIR (M7g3);
-/// v9: /BIN/CCAT — утилита cat на C поверх libc (M9m).
-const DISK_VERSION: u32 = 9;
+/// v9: /BIN/CCAT — утилита cat на C поверх libc (M9m); v10: /BIN/WC — утилита wc на C (M9r).
+const DISK_VERSION: u32 = 10;
 
 /// Создаёт тестовый образ диска (M6c/M6f2): форматирует его как **FAT32** и кладёт тестовый
 /// файл плюс пользовательские ELF-программы (для `execve` по пути — M6f2). Образ —
@@ -517,6 +523,14 @@ fn generate_disk_image(manifest: &str) {
         f.write_all(&ccat_bytes)
             .expect("write BIN/CCAT on disk image");
         f.flush().expect("flush BIN/CCAT on disk image");
+
+        // C-coreutil `wc` (M9r): тоже из OUT_DIR на диск как /BIN/WC (8.3 заглавными).
+        let wc_elf = PathBuf::from(&out_dir).join("wc");
+        let wc_bytes = std::fs::read(&wc_elf)
+            .unwrap_or_else(|e| panic!("read {} for disk image: {e}", wc_elf.display()));
+        let mut f = bin.create_file("WC").expect("create BIN/WC on disk image");
+        f.write_all(&wc_bytes).expect("write BIN/WC on disk image");
+        f.flush().expect("flush BIN/WC on disk image");
     }
 
     if let Some(parent) = disk.parent() {
