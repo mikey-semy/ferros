@@ -139,12 +139,14 @@ Linux software → libc first): **M9a–M9f** built the libc-facing syscall surf
   - **M9i — FPU/SSE context save** (done). Now that ring 3 uses SSE, `switch_task` `fxsave`/`fxrstor`s
     a per-thread FPU area on every switch (inherited on `fork`), so XMM/MXCSR no longer leak between
     processes.
-  - **M9j–M9n — growing the hand-rolled libc** (done). `printf`/`snprintf` (M9j), string/mem/`atoi`
-    (M9k), a C file-reader (M9l) and the `/bin/ccat` coreutil (M9m), and a **stdio `FILE*` layer**
-    (M9n): `fopen`/`fclose`/`fgets`/`fgetc`/`fputs`/`fputc`/`fwrite`/`fread`/`fprintf` + `stdin`/
-    `stdout`/`stderr`, over the existing `open`/`read`/`write`/`close` (unbuffered for now). A C program
-    does a `FILE*` write→read round-trip on the FAT disk. Next libc growth: env/`getopt`/`strtol`,
-    stdio buffering (HARDENING), and/or revisiting relibc when its build is reachable.
+  - **M9j–M9o — growing the hand-rolled libc** (done). `printf`/`snprintf` (M9j), string/mem/`atoi`
+    (M9k), a C file-reader (M9l) and the `/bin/ccat` coreutil (M9m), a **stdio `FILE*` layer** (M9n:
+    `fopen`/`fgets`/`fgetc`/`fputs`/`fputc`/`fwrite`/`fread`/`fprintf` + `stdin`/`stdout`/`stderr`,
+    unbuffered, over `open`/`read`/`write`/`close`), and **string/number helpers** (M9o:
+    `strtol`/`strtoul`, `strstr`, `strcat`/`strncat`, `strrchr`, `strtok`). A C program does a `FILE*`
+    write→read round-trip on FAT; `libcheck` self-tests the string/number functions. Next libc growth:
+    `environ`/`getenv` (needs crt0 to capture `envp`), `getopt`, stdio buffering (HARDENING), and/or
+    revisiting relibc when its build is reachable.
 - **M8 — Networking** (in progress). NIC driver (virtio-net) + TCP/IP via `smoltcp` (vendored per
   D13 — a real stack is the "genuinely complex" kind we reuse). Stages:
   - **M8a — NIC detection** (done). QEMU gets a `virtio-net-pci` over user-mode (SLIRP) networking;

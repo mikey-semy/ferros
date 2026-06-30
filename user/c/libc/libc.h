@@ -84,8 +84,19 @@ int strcmp(const char *a, const char *b);
 int strncmp(const char *a, const char *b, size_t n);
 char *strcpy(char *dst, const char *src);
 char *strncpy(char *dst, const char *src, size_t n);
-char *strchr(const char *s, int c); /* находит и завершающий '\0' */
+char *strcat(char *dst, const char *src);            /* дописывает src в конец dst */
+char *strncat(char *dst, const char *src, size_t n); /* не больше n символов src + нуль */
+char *strchr(const char *s, int c);                  /* находит и завершающий '\0' */
+char *strrchr(const char *s, int c);                 /* последнее вхождение (и '\0') */
+char *strstr(const char *haystack, const char *needle); /* подстрока (пустая → haystack) */
+char *strtok(char *str, const char *delim);          /* разбиение по разделителям (статич. состояние) */
 int atoi(const char *s);
+
+/* Строка → число (M9o). `base` 0 (авто: `0x`→16, `0`→8, иначе 10) или 2..36; пропускает ведущие
+ * пробелы, понимает знак. Если `endptr != NULL`, кладёт туда конец разобранного числа (или сам
+ * `nptr`, если цифр не было). Без проверки переполнения (см. HARDENING). */
+long strtol(const char *nptr, char **endptr, int base);
+unsigned long strtoul(const char *nptr, char **endptr, int base);
 
 /* Минимальный вывод символов/строк в stdout. */
 int putchar(int c);
