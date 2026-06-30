@@ -98,6 +98,20 @@ int atoi(const char *s);
 long strtol(const char *nptr, char **endptr, int base);
 unsigned long strtoul(const char *nptr, char **endptr, int base);
 
+/* --- Разбор опций командной строки getopt(3) (M9p) --- */
+
+/* Глобалы getopt: `optarg` — аргумент опции; `optind` — индекс следующего argv; `opterr` —
+ * печатать ли ошибку в stderr (по умолчанию 1, 0 — молчать); `optopt` — символ проблемной опции. */
+extern char *optarg;
+extern int optind;
+extern int opterr;
+extern int optopt;
+
+/* Разбирает короткие опции по `optstring` (буква = опция; буква + ':' = опция с аргументом).
+ * Возвращает символ опции, '?' для неизвестной/без аргумента (или ':' при ведущем ':' в optstring),
+ * либо -1 по концу опций (вкл. "--"). Поддержаны кластеризация (`-abc`) и слитный аргумент (`-oVAL`). */
+int getopt(int argc, char *const argv[], const char *optstring);
+
 /* Минимальный вывод символов/строк в stdout. */
 int putchar(int c);
 int puts(const char *s);
