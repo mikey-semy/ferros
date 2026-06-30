@@ -186,6 +186,13 @@ Linux software → libc first): **M9a–M9f** built the libc-facing syscall surf
     1.1.1.1:80 and verifies the response starts with `HTTP/1.` → `[httpget] HTTP/1.1 301 Moved
     Permanently`. Exercises TCP for real (multi-segment response, EOF on peer close). **ferros runs an
     HTTP client** — networking demonstrated end-to-end as real software uses it.
+  - **M8g — scheduler-yield socket blocking** (done, hardening). The socket `recvfrom`/`recv`/`connect`/
+    `send` loops now `yield_now()` between polls instead of busy-spinning. Because `yield_now` does a
+    *cooperative* context switch (works under the syscall's IF=0) to a thread that runs with IF=1, the
+    PIT tick advances while waiting — so the timeouts are real wall-clock deadlines again (no TSC
+    needed), and a waiting socket no longer monopolizes the CPU. The `STACK` lock is released before
+    yielding (no held-lock-across-yield deadlock on a single CPU). Still cooperative polling, not true
+    block/wake (a background net poller is the next refinement; see HARDENING).
 - **M10 — Graphics / GUI (optional, huge).** Framebuffer, compositor, window
   manager, toolkit.
 - **M11 — Real hardware.** UEFI boot (migrate off bootloader 0.9), drivers for a
