@@ -350,6 +350,34 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
   (`kill(pid <= 0)` is `-ESRCH`), and `SIGSTOP`/job-control stop actions are unimplemented
   (treated as no-op rather than stopping the process).
 
+## M8 — networking
+
+- **Net is fully polled, no interrupts (M8b+).** The virtio-net driver and the whole smoltcp stack
+  are driven by polling (`recv`/`poll`), never by the NIC's IRQ. Fine for bring-up; a real driver
+  uses the device interrupt + a soft-IRQ/NAPI-style RX path so the CPU isn't spent spinning.
+- **Socket `recvfrom` blocks by busy-poll, not scheduler block/wake (M8d3).** Unlike `read(stdin)`/
+  `read(pipe)` which park the thread and are woken by an event, `udp_recvfrom` spins (polling the
+  stack) until a datagram arrives or a **poll-count** budget (`RECV_MAX_SPINS`) expires. Two reasons
+  it's not time-based: syscalls run with **IF=0**, so the PIT tick (and `uptime_ns`) is frozen for
+  the duration — a wall-clock deadline can't fire; and polled RX means *something* must keep polling
+  to receive at all. Proper blocking needs a **background net poller** task that services RX and
+  wakes per-socket waiters (block/wake), plus a time source that advances under IF=0 (e.g. TSC). Until
+  then the busy-poll starves other threads while a socket waits, and the timeout is a coarse spin
+  count, not a real duration. Same shape in the lazy DHCP bring-up (`DHCP_MAX_SPINS`).
+- **First `socket()` does DHCP inline, holding the stack lock (M8d3).** Lazy `ensure_up` runs the full
+  DHCP exchange while holding `STACK`, so a concurrent socket syscall blocks until it finishes (or its
+  spin budget expires). Bring the stack up once at boot (kernel context, IF=1) instead, or move DHCP
+  off the lock.
+- **`read`/`write` on a socket fd return `-EBADF` (M8d3).** Linux lets `read(2)`/`write(2)` act as
+  `recv`/`send` on a (connected) socket; ferros only wires `sendto`/`recvfrom`. A stock binary using
+  `read`/`write` on a socket breaks. Cheap to add once a connected-peer notion exists.
+- **UDP only; no TCP, no `connect`/`getsockname`/`setsockopt` (M8d3).** `SOCK_STREAM` (connect/send/
+  recv), socket options, and non-blocking (`O_NONBLOCK`/`MSG_DONTWAIT`) are unimplemented. `sendto`
+  kicks the stack once and relies on a following `recvfrom` to drive ARP/retransmit — a send-only
+  program may not actually transmit until the next poll.
+- **Net time base = PIT `uptime_ns` (~55 ms granularity) (M8c).** Coarse for smoltcp retransmit/RTT
+  timers; and frozen under IF=0 (above). A monotonic high-res clock (TSC/HPET) is the real fix.
+
 ## M9 — POSIX / libc
 
 - **`brk` heap is a fixed region, no `mmap` (M9a).** The process heap is a fixed window

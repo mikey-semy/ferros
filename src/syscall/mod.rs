@@ -64,6 +64,12 @@ pub fn dispatch(nr: u64, args: [u64; 6], user_rsp: u64) -> i64 {
         abi::SYS_WRITEV => files::sys_writev(args[0], args[1], args[2], user_rsp),
         abi::SYS_READV => files::sys_readv(args[0], args[1], args[2]),
         abi::SYS_FCNTL => files::sys_fcntl(args[0], args[1], args[2]),
+        // Сокеты (M8d3): аргументы по Linux-ABI; sendto/recvfrom используют r10(flags)=args[3] —
+        // его игнорируем, адрес и длина — args[4]/args[5].
+        abi::SYS_SOCKET => files::sys_socket(args[0], args[1], args[2]),
+        abi::SYS_BIND => files::sys_bind(args[0], args[1], args[2]),
+        abi::SYS_SENDTO => files::sys_sendto(args[0], args[1], args[2], args[4], args[5]),
+        abi::SYS_RECVFROM => files::sys_recvfrom(args[0], args[1], args[2], args[4], args[5]),
         abi::SYS_CLOSE => files::sys_close(args[0]),
         abi::SYS_BRK => files::sys_brk(args[0]),
         // lstat == stat: симссылок у нас нет, следовать не по чему.

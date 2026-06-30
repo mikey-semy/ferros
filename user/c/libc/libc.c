@@ -22,6 +22,19 @@ static long sc3(long nr, long a, long b, long c) {
     return ret;
 }
 
+/* 6-аргументный сисколл: 4-й аргумент в r10 (НЕ rcx — её затирает `syscall`), 5-й в r8, 6-й в r9. */
+static long sc6(long nr, long a, long b, long c, long d, long e, long f) {
+    long ret;
+    register long r10 __asm__("r10") = d;
+    register long r8 __asm__("r8") = e;
+    register long r9 __asm__("r9") = f;
+    __asm__ volatile("syscall"
+                     : "=a"(ret)
+                     : "a"(nr), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9)
+                     : "rcx", "r11", "memory");
+    return ret;
+}
+
 /* --- Процесс и ввод-вывод --- */
 
 __attribute__((noreturn)) void exit(int code) {
@@ -43,6 +56,25 @@ int open(const char *path, int flags) {
 
 int close(int fd) {
     return (int)sc1(3, fd); /* SYS_close */
+}
+
+/* --- Сокеты (M8d3): обёртки над сисколлами socket/bind/sendto/recvfrom. --- */
+
+int socket(int domain, int type, int protocol) {
+    return (int)sc3(41, domain, type, protocol); /* SYS_socket */
+}
+
+int bind(int fd, const struct sockaddr_in *addr, socklen_t addrlen) {
+    return (int)sc3(49, fd, (long)addr, addrlen); /* SYS_bind */
+}
+
+long sendto(int fd, const void *buf, size_t n, int flags, const struct sockaddr_in *dst,
+            socklen_t dstlen) {
+    return sc6(44, fd, (long)buf, (long)n, flags, (long)dst, dstlen); /* SYS_sendto */
+}
+
+long recvfrom(int fd, void *buf, size_t n, int flags, struct sockaddr_in *src, socklen_t *srclen) {
+    return sc6(45, fd, (long)buf, (long)n, flags, (long)src, (long)srclen); /* SYS_recvfrom */
 }
 
 /* --- Куча: bump-аллокатор поверх brk (сисколл 12). --- */
