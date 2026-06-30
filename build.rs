@@ -166,6 +166,7 @@ fn build_c_programs(manifest: &str) {
         c_dir.join("dnsclient.c"),
         c_dir.join("tcpdns.c"),
         c_dir.join("httpget.c"),
+        c_dir.join("stdiotest.c"),
         c_dir.join("dns.h"),
         libc_dir.join("crt0.s"),
         libc_dir.join("libc.c"),
@@ -293,6 +294,19 @@ fn build_c_programs(manifest: &str) {
         &linker,
     );
     println!("cargo:rustc-env=USER_HTTPGET_ELF={}", http_elf.display());
+
+    // M9n: `stdiotest` — round-trip через FILE* (fopen/fputs/fprintf/fgets/fgetc).
+    let stdio_o = clang_compile_c(
+        &c_dir.join("stdiotest.c"),
+        &out_dir.join("stdiotest.o"),
+        &[&inc],
+    );
+    let stdio_elf = clang_link(
+        &[&crt0_o, &libc_o, &stdio_o],
+        &out_dir.join("stdiotest"),
+        &linker,
+    );
+    println!("cargo:rustc-env=USER_STDIOTEST_ELF={}", stdio_elf.display());
 }
 
 /// Общие флаги компиляции C для пользовательского таргета ferros (см. [`build_c_programs`]).
