@@ -143,10 +143,11 @@ Linux software → libc first): **M9a–M9f** built the libc-facing syscall surf
     (M9k), a C file-reader (M9l) and the `/bin/ccat` coreutil (M9m), a **stdio `FILE*` layer** (M9n:
     `fopen`/`fgets`/`fgetc`/`fputs`/`fputc`/`fwrite`/`fread`/`fprintf` + `stdin`/`stdout`/`stderr`,
     unbuffered, over `open`/`read`/`write`/`close`), and **string/number helpers** (M9o:
-    `strtol`/`strtoul`, `strstr`, `strcat`/`strncat`, `strrchr`, `strtok`). A C program does a `FILE*`
-    write→read round-trip on FAT; `libcheck` self-tests the string/number functions. Next libc growth:
-    `environ`/`getenv` (needs crt0 to capture `envp`), `getopt`, stdio buffering (HARDENING), and/or
-    revisiting relibc when its build is reachable.
+    `strtol`/`strtoul`, `strstr`, `strcat`/`strncat`, `strrchr`, `strtok`), and **`getopt`** (M9p:
+    option parsing — clustering `-abc`, inline `-oVAL` / separate `-o VAL` args, `--`, `?`/`:`, with
+    `optarg`/`optind`/`opterr`/`optopt`). A C program does a `FILE*` write→read round-trip on FAT;
+    `libcheck` self-tests the string/number/getopt functions. Next libc growth: `environ`/`getenv`
+    (needs crt0 to capture `envp`), stdio buffering (HARDENING), and/or revisiting relibc.
 - **M8 — Networking** (in progress). NIC driver (virtio-net) + TCP/IP via `smoltcp` (vendored per
   D13 — a real stack is the "genuinely complex" kind we reuse). Stages:
   - **M8a — NIC detection** (done). QEMU gets a `virtio-net-pci` over user-mode (SLIRP) networking;
