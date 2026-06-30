@@ -355,19 +355,21 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
 - **Net is fully polled, no interrupts (M8b+).** The virtio-net driver and the whole smoltcp stack
   are driven by polling (`recv`/`poll`), never by the NIC's IRQ. Fine for bring-up; a real driver
   uses the device interrupt + a soft-IRQ/NAPI-style RX path so the CPU isn't spent spinning.
-- **Socket `recvfrom` blocks by busy-poll, not scheduler block/wake (M8d3).** Unlike `read(stdin)`/
-  `read(pipe)` which park the thread and are woken by an event, `udp_recvfrom` spins (polling the
-  stack) until a datagram arrives or a **poll-count** budget (`RECV_MAX_SPINS`) expires. Two reasons
-  it's not time-based: syscalls run with **IF=0**, so the PIT tick (and `uptime_ns`) is frozen for
-  the duration — a wall-clock deadline can't fire; and polled RX means *something* must keep polling
-  to receive at all. Proper blocking needs a **background net poller** task that services RX and
-  wakes per-socket waiters (block/wake), plus a time source that advances under IF=0 (e.g. TSC). Until
-  then the busy-poll starves other threads while a socket waits, and the timeout is a coarse spin
-  count, not a real duration. Same shape in the lazy DHCP bring-up (`DHCP_MAX_SPINS`).
-- **First `socket()` does DHCP inline, holding the stack lock (M8d3).** Lazy `ensure_up` runs the full
-  DHCP exchange while holding `STACK`, so a concurrent socket syscall blocks until it finishes (or its
-  spin budget expires). Bring the stack up once at boot (kernel context, IF=1) instead, or move DHCP
-  off the lock.
+- **Socket blocking is cooperative yield-polling, not true block/wake (M8d3, improved M8g).** The
+  socket `recvfrom`/`recv`/`connect`/`send` loops now **`yield_now()`** between polls instead of
+  busy-spinning: the waiting thread gives up the CPU (no more monopolization), and because the thread
+  it yields to runs with IF=1 the PIT tick advances — so the timeouts are real **wall-clock** deadlines
+  again (no TSC needed). But it's still *polling*: the thread wakes each scheduling round to re-poll
+  the stack, rather than sleeping until a packet arrives. True **block/wake** needs a **background net
+  poller** task that services RX and wakes per-socket waiters (so a blocked socket thread isn't
+  scheduled at all until its data is ready). RX latency is also coupled to the scheduler round
+  (~1 PIT tick ≈ 55 ms) since nothing polls between the thread's turns — the background poller would
+  fix that too.
+- **First `socket()` does DHCP inline by busy-spin, holding the stack lock (M8d3).** Lazy `ensure_up`
+  runs the full DHCP exchange **busy-spinning** (not yielding — it holds `STACK` across the whole
+  exchange, and yielding while holding a spin lock could deadlock a second net thread), bounded by a
+  poll count (`DHCP_MAX_SPINS`). So a concurrent socket syscall blocks until DHCP finishes. Bring the
+  stack up once at boot (kernel context, IF=1) instead, or move DHCP off the lock so it can yield.
 - **`read`/`write` on a socket fd return `-EBADF` (M8d3).** Linux lets `read(2)`/`write(2)` act as
   `recv`/`send` on a (connected) socket; ferros only wires `sendto`/`recvfrom`. A stock binary using
   `read`/`write` on a socket breaks. Cheap to add once a connected-peer notion exists.
