@@ -6,6 +6,7 @@
 //!
 //! M8c: поднимаем интерфейс и получаем IP по **DHCP** (см. [`dhcp_acquire`]).
 //! M8d1: умеем **ping** — шлём ICMP echo и считаем ответы (см. [`ping`]).
+//! M8d2: умеем **резолвить имена** — DNS-запрос через UDP-сокет (см. [`resolve`]).
 //!
 //! # Как smoltcp общается с железом
 //!
@@ -14,14 +15,18 @@
 //! `TxToken`, в который smoltcp пишет кадр, а мы его шлём). Всё остальное (составить ARP/IP/UDP,
 //! таймеры повторов) — внутри smoltcp.
 
+mod dns;
+
 use crate::arch::uptime_ns;
 use crate::drivers::virtio_net;
 use alloc::vec::Vec;
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::socket::{dhcpv4, icmp};
+use smoltcp::socket::{dhcpv4, icmp, udp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, Ipv4Address};
+use smoltcp::wire::{
+    EthernetAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, IpEndpoint, Ipv4Address,
+};
 
 /// Максимальный размер Ethernet-кадра (без FCS) — MTU линии для smoltcp.
 const MTU: usize = 1514;
@@ -262,4 +267,81 @@ pub fn ping(dest: [u8; 4], count: usize, timeout_ns: u64) -> Option<PingStats> {
     }
 
     Some(PingStats { sent, received })
+}
+
+/// Локальный (эфемерный) UDP-порт, с которого шлём DNS-запрос.
+const DNS_LOCAL_PORT: u16 = 49152;
+/// Размер буферов под DNS-сообщение. Ответ без EDNS по UDP ограничен 512 байтами (RFC 1035), но
+/// берём с запасом до одного Ethernet-MTU — тогда и редкий крупный ответ не обрежется (обрезанный
+/// `recv_slice` отбросил бы пакет, и резолв впустую досидел бы до таймаута).
+const DNS_MSG_LEN: usize = 1500;
+
+/// Резолвит `hostname` в IPv4 (A-запись) через DNS-сервер `dns_server` (UDP, порт 53). Поднимает
+/// сеть по DHCP, шлёт один DNS-запрос и разбирает ответ. `timeout_ns` — общий бюджет аптайма (на
+/// DHCP и на обмен). `None` — драйвер не поднят, DHCP не настроился, либо за отведённое время не
+/// пришло ответа с A-записью.
+///
+/// Сам DNS (собрать запрос / разобрать ответ) — наш модуль `dns`; транспорт — UDP-сокет smoltcp.
+/// Это тот же путь `bind`/`send`/`recv`, который дальше обернут сокет-сисколлы кольца 3 (M8d3): в
+/// SLIRP DNS-сервер живёт на 10.0.2.3, туда и спрашиваем.
+pub fn resolve(hostname: &str, dns_server: [u8; 4], timeout_ns: u64) -> Option<[u8; 4]> {
+    let (mut device, mut iface, mut sockets) = bring_up()?;
+    let deadline = uptime_ns() + timeout_ns;
+    dhcp_configure(&mut iface, &mut device, &mut sockets, deadline)?;
+
+    // UDP-сокет под DNS: буферы на одно сообщение (см. DNS_MSG_LEN), пары слотов метаданных хватает.
+    let rx = udp::PacketBuffer::new(
+        alloc::vec![udp::PacketMetadata::EMPTY; 4],
+        alloc::vec![0u8; DNS_MSG_LEN],
+    );
+    let tx = udp::PacketBuffer::new(
+        alloc::vec![udp::PacketMetadata::EMPTY; 4],
+        alloc::vec![0u8; DNS_MSG_LEN],
+    );
+    let mut socket = udp::Socket::new(rx, tx);
+    socket.bind(DNS_LOCAL_PORT).ok()?;
+    let handle = sockets.add(socket);
+
+    let server = IpEndpoint {
+        addr: IpAddress::Ipv4(Ipv4Address::new(
+            dns_server[0],
+            dns_server[1],
+            dns_server[2],
+            dns_server[3],
+        )),
+        port: 53,
+    };
+    // Транзакционный id меняем от запроса к запросу (из аптайма) — чтобы устаревший ответ от
+    // прошлого резолва не сошёл за наш; `parse_answer` сверяет именно его.
+    let id = uptime_ns() as u16;
+    let mut query = [0u8; DNS_MSG_LEN];
+    let qlen = dns::build_query(id, hostname, &mut query)?;
+
+    let mut asked = false;
+    while uptime_ns() < deadline {
+        iface.poll(now(), &mut device, &mut sockets);
+        let socket = sockets.get_mut::<udp::Socket>(handle);
+
+        // Один раз отправляем запрос, как только сокет готов слать (после разрешения ARP к серверу).
+        if !asked && socket.can_send() && socket.send_slice(&query[..qlen], server).is_ok() {
+            asked = true;
+        }
+
+        // Разбираем пришедшие датаграммы. Свой ответ — итог определённый: A-запись или «адреса нет»
+        // (тогда не ждём таймаут впустую). Чужие/битые — пропускаем и читаем следующую (не бросаем
+        // дренаж: обрезанный recv_slice уже снял пакет, продолжаем со следующего).
+        while socket.can_recv() {
+            let mut buf = [0u8; DNS_MSG_LEN];
+            let Ok((len, _meta)) = socket.recv_slice(&mut buf) else {
+                continue;
+            };
+            match dns::parse_answer(id, &buf[..len]) {
+                dns::Answer::Ipv4(addr) => return Some(addr),
+                dns::Answer::NoIpv4 => return None,
+                dns::Answer::Ignore => {}
+            }
+        }
+        core::hint::spin_loop();
+    }
+    None
 }
