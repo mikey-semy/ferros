@@ -246,6 +246,154 @@ int atoi(const char *s) {
     return sign * v;
 }
 
+char *strcat(char *dst, const char *src) {
+    char *d = dst;
+    while (*d != '\0') {
+        d++; /* к концу dst */
+    }
+    while ((*d = *src) != '\0') {
+        d++;
+        src++;
+    }
+    return dst;
+}
+
+char *strncat(char *dst, const char *src, size_t n) {
+    char *d = dst;
+    while (*d != '\0') {
+        d++;
+    }
+    while (n > 0 && *src != '\0') {
+        *d++ = *src++;
+        n--;
+    }
+    *d = '\0'; /* strncat всегда завершает нулём */
+    return dst;
+}
+
+char *strrchr(const char *s, int c) {
+    char ch = (char)c;
+    const char *last = 0;
+    for (;;) {
+        if (*s == ch) {
+            last = s; /* последнее вхождение (включая завершающий '\0' при c=='\0') */
+        }
+        if (*s == '\0') {
+            break;
+        }
+        s++;
+    }
+    return (char *)last;
+}
+
+char *strstr(const char *haystack, const char *needle) {
+    if (*needle == '\0') {
+        return (char *)haystack; /* пустая игла → начало стога */
+    }
+    for (; *haystack != '\0'; haystack++) {
+        const char *h = haystack;
+        const char *n = needle;
+        while (*h != '\0' && *n != '\0' && *h == *n) {
+            h++;
+            n++;
+        }
+        if (*n == '\0') {
+            return (char *)haystack; /* игла кончилась → совпало */
+        }
+    }
+    return 0;
+}
+
+static char *strtok_save; /* сохранённая позиция между вызовами strtok */
+
+char *strtok(char *str, const char *delim) {
+    char *s = str ? str : strtok_save;
+    if (!s) {
+        return 0;
+    }
+    while (*s != '\0' && strchr(delim, *s) != 0) {
+        s++; /* пропускаем ведущие разделители */
+    }
+    if (*s == '\0') {
+        strtok_save = 0;
+        return 0; /* остались только разделители / конец строки */
+    }
+    char *tok = s;
+    while (*s != '\0' && strchr(delim, *s) == 0) {
+        s++; /* до следующего разделителя */
+    }
+    if (*s != '\0') {
+        *s = '\0';
+        strtok_save = s + 1;
+    } else {
+        strtok_save = 0;
+    }
+    return tok;
+}
+
+/* Общий разбор целого для strtol/strtoul: пропускает пробелы, читает знак (в `*neg`), авто/заданную
+ * систему счисления, накапливает в `unsigned long`. Без проверки переполнения (см. HARDENING). */
+static unsigned long parse_int(const char *nptr, char **endptr, int base, int *neg) {
+    const char *p = nptr;
+    while (*p == ' ' || (*p >= '\t' && *p <= '\r')) {
+        p++; /* ведущие пробелы (isspace) */
+    }
+    *neg = 0;
+    if (*p == '+' || *p == '-') {
+        *neg = (*p == '-');
+        p++;
+    }
+    if (base == 0) {
+        if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+            base = 16;
+            p += 2;
+        } else if (p[0] == '0') {
+            base = 8;
+            p++;
+        } else {
+            base = 10;
+        }
+    } else if (base == 16 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+        p += 2; /* необязательный префикс 0x при base=16 */
+    }
+    unsigned long acc = 0;
+    int any = 0;
+    for (;; p++) {
+        int c = (unsigned char)*p;
+        int d;
+        if (c >= '0' && c <= '9') {
+            d = c - '0';
+        } else if (c >= 'a' && c <= 'z') {
+            d = c - 'a' + 10;
+        } else if (c >= 'A' && c <= 'Z') {
+            d = c - 'A' + 10;
+        } else {
+            break;
+        }
+        if (d >= base) {
+            break; /* цифра не из этой системы счисления */
+        }
+        acc = acc * (unsigned long)base + (unsigned long)d;
+        any = 1;
+    }
+    if (endptr) {
+        *endptr = (char *)(any ? p : nptr); /* нет цифр → endptr == nptr */
+    }
+    return acc;
+}
+
+long strtol(const char *nptr, char **endptr, int base) {
+    int neg;
+    unsigned long acc = parse_int(nptr, endptr, base, &neg);
+    return neg ? -(long)acc : (long)acc;
+}
+
+unsigned long strtoul(const char *nptr, char **endptr, int base) {
+    int neg;
+    unsigned long acc = parse_int(nptr, endptr, base, &neg);
+    return neg ? 0UL - acc : acc; /* как POSIX: знак минус → модульное отрицание */
+}
+
 int putchar(int c) {
     char ch = (char)c;
     return (int)write(1, &ch, 1);

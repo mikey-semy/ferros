@@ -1,6 +1,7 @@
 /*
- * Проверка строковых/мемори/конвертирующих функций минимальной libc (M9k): `memmove`/`memcmp`/
- * `strncmp`/`strcpy`/`strncpy`/`strchr`/`atoi`. Линкуется с crt0 + libc.
+ * Проверка строковых/мемори/конвертирующих функций минимальной libc (M9k, расширено M9o):
+ * `memmove`/`memcmp`/`strncmp`/`strcpy`/`strncpy`/`strchr`/`atoi` и новые
+ * `strcat`/`strncat`/`strrchr`/`strstr`/`strtok`/`strtol`/`strtoul`. Линкуется с crt0 + libc.
  *
  * Самопроверяется: каждая группа возвращает свой ненулевой код при ошибке, 0 — если всё сошлось.
  */
@@ -62,6 +63,82 @@ int main(void) {
     if (atoi("-123") != -123 || atoi("  42") != 42 || atoi("+7") != 7 || atoi("abc") != 0 ||
         atoi("12x") != 12) {
         return 17;
+    }
+
+    /* strcat / strncat (M9o). */
+    {
+        char c[16];
+        strcpy(c, "foo");
+        strcat(c, "bar");
+        if (strcmp(c, "foobar") != 0) {
+            return 18;
+        }
+        strcpy(c, "foo");
+        strncat(c, "barbaz", 3); /* допишет только "bar" + нуль */
+        if (strcmp(c, "foobar") != 0) {
+            return 19;
+        }
+    }
+
+    /* strrchr: последнее вхождение, не найдено, завершающий '\0'. */
+    {
+        char path[] = "a/b/c";
+        if (strrchr(path, '/') != path + 3 || strrchr(path, 'z') != 0 ||
+            strrchr(path, '\0') != path + 5) {
+            return 20;
+        }
+    }
+
+    /* strstr: найдено, не найдено, пустая игла → начало стога. */
+    {
+        char hay[] = "hello world";
+        if (strstr(hay, "wor") != hay + 6 || strstr(hay, "xyz") != 0 || strstr(hay, "") != hay) {
+            return 21;
+        }
+    }
+
+    /* strtol: знак; авто-база 0x/0; заданная база; endptr; не-число. */
+    {
+        char *end;
+        char bad[] = "z9";
+        if (strtol("-42", 0, 10) != -42) {
+            return 22;
+        }
+        if (strtol("0x1F", &end, 0) != 31 || *end != '\0') {
+            return 22;
+        }
+        if (strtol("  ff", &end, 16) != 255) {
+            return 22;
+        }
+        if (strtol("0755", 0, 0) != 0755) { /* ведущий 0 → восьмеричное */
+            return 22;
+        }
+        if (strtol(bad, &end, 10) != 0 || end != bad) { /* нет цифр → 0, endptr == nptr */
+            return 22;
+        }
+    }
+
+    /* strtoul: большое беззнаковое; hex. */
+    if (strtoul("4294967295", 0, 10) != 4294967295UL || strtoul("0xff", 0, 16) != 255) {
+        return 23;
+    }
+
+    /* strtok: разбиение, пропуск пустых полей (",,"). */
+    {
+        char s[] = "a,b,,c";
+        char *t = strtok(s, ",");
+        if (!t || strcmp(t, "a") != 0) {
+            return 24;
+        }
+        if (!(t = strtok(0, ",")) || strcmp(t, "b") != 0) {
+            return 24;
+        }
+        if (!(t = strtok(0, ",")) || strcmp(t, "c") != 0) {
+            return 24;
+        }
+        if (strtok(0, ",") != 0) {
+            return 24;
+        }
     }
 
     puts("libc strings ok");
