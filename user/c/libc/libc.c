@@ -382,3 +382,195 @@ int printf(const char *fmt, ...) {
     write(1, buf, (size_t)w);
     return n;
 }
+
+/* --- Потоковый ввод-вывод stdio (`FILE *`) (M9n) --- */
+
+/* Внутренние биты `FILE.flags`. */
+#define _F_EOF 1 /* достигнут конец файла */
+#define _F_ERR 2 /* была ошибка ввода-вывода */
+
+/* Статические объекты стандартных потоков (дескрипторы 0/1/2) и указатели на них. */
+static FILE _stdin = {0, 0};
+static FILE _stdout = {1, 0};
+static FILE _stderr = {2, 0};
+FILE *stdin = &_stdin;
+FILE *stdout = &_stdout;
+FILE *stderr = &_stderr;
+
+FILE *fopen(const char *path, const char *mode) {
+    if (!mode) {
+        return 0; /* без режима открывать нечем (иначе разыменовали бы NULL) */
+    }
+    /* '+' где угодно в режиме = чтение-запись; первый символ задаёт базу. */
+    int plus = 0;
+    for (const char *m = mode; *m; m++) {
+        if (*m == '+') {
+            plus = 1;
+        }
+    }
+    int flags;
+    switch (mode[0]) {
+    case 'r':
+        flags = plus ? O_RDWR : O_RDONLY;
+        break;
+    case 'w':
+        flags = (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_TRUNC;
+        break;
+    case 'a':
+        flags = (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_APPEND;
+        break;
+    default:
+        return 0; /* неизвестный режим */
+    }
+    int fd = open(path, flags);
+    if (fd < 0) {
+        return 0;
+    }
+    FILE *f = (FILE *)malloc(sizeof(FILE));
+    if (!f) {
+        close(fd);
+        return 0;
+    }
+    f->fd = fd;
+    f->flags = 0;
+    return f;
+}
+
+int fclose(FILE *f) {
+    if (!f) {
+        return EOF;
+    }
+    int r = close(f->fd);
+    /* Стандартные потоки статические — их не освобождаем (bump-free всё равно no-op, но явно понятнее). */
+    if (f != stdin && f != stdout && f != stderr) {
+        free(f);
+    }
+    return r < 0 ? EOF : 0;
+}
+
+int fgetc(FILE *f) {
+    unsigned char c;
+    long n = read(f->fd, &c, 1);
+    if (n <= 0) {
+        f->flags |= (n == 0) ? _F_EOF : _F_ERR;
+        return EOF;
+    }
+    return (int)c;
+}
+
+int getc(FILE *f) {
+    return fgetc(f);
+}
+
+char *fgets(char *s, int size, FILE *f) {
+    if (size <= 0) {
+        return 0;
+    }
+    int i = 0;
+    int hit_eof = 0;
+    while (i < size - 1) {
+        int c = fgetc(f);
+        if (c == EOF) {
+            hit_eof = 1;
+            break;
+        }
+        s[i++] = (char)c;
+        if (c == '\n') {
+            break; /* строку завершаем по переводу строки (включая его) */
+        }
+    }
+    /* NULL только если уперлись в EOF/ошибку, не прочитав НИ ОДНОГО символа. `size == 1` (нет места
+     * под символы) — это не EOF: пишем пустую строку и возвращаем `s`, как требует C. */
+    if (i == 0 && hit_eof) {
+        return 0;
+    }
+    s[i] = '\0';
+    return s;
+}
+
+size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f) {
+    if (size == 0) {
+        return 0;
+    }
+    unsigned char *p = (unsigned char *)ptr;
+    size_t total = size * nmemb;
+    size_t got = 0;
+    while (got < total) {
+        long n = read(f->fd, p + got, total - got);
+        if (n < 0) {
+            f->flags |= _F_ERR;
+            break;
+        }
+        if (n == 0) {
+            f->flags |= _F_EOF;
+            break;
+        }
+        got += (size_t)n;
+    }
+    return got / size; /* число ПОЛНЫХ элементов */
+}
+
+int fputc(int c, FILE *f) {
+    unsigned char ch = (unsigned char)c;
+    if (write(f->fd, &ch, 1) != 1) {
+        f->flags |= _F_ERR;
+        return EOF;
+    }
+    return (int)ch;
+}
+
+int putc(int c, FILE *f) {
+    return fputc(c, f);
+}
+
+int fputs(const char *s, FILE *f) {
+    size_t len = strlen(s);
+    if ((size_t)write(f->fd, s, len) != len) {
+        f->flags |= _F_ERR;
+        return EOF;
+    }
+    return 0;
+}
+
+size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *f) {
+    if (size == 0) {
+        return 0;
+    }
+    const unsigned char *p = (const unsigned char *)ptr;
+    size_t total = size * nmemb;
+    size_t put = 0;
+    while (put < total) {
+        long n = write(f->fd, p + put, total - put);
+        if (n <= 0) {
+            f->flags |= _F_ERR;
+            break;
+        }
+        put += (size_t)n;
+    }
+    return put / size;
+}
+
+int fprintf(FILE *f, const char *fmt, ...) {
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    /* Длиннее буфера — пишем сколько влезло (обрезано), как printf. */
+    int w = (n < (int)sizeof buf) ? n : (int)(sizeof buf) - 1;
+    fwrite(buf, 1, (size_t)w, f);
+    return n;
+}
+
+int fflush(FILE *f) {
+    (void)f; /* небуферизованный поток: писать нечего, всё уже ушло в write */
+    return 0;
+}
+
+int feof(FILE *f) {
+    return (f->flags & _F_EOF) ? 1 : 0;
+}
+
+int ferror(FILE *f) {
+    return (f->flags & _F_ERR) ? 1 : 0;
+}

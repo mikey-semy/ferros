@@ -105,6 +105,9 @@ pub static TCPDNS_ELF: &[u8] = include_bytes!(env!("USER_TCPDNS_ELF"));
 /// Прикладной C HTTP-клиент (M8f): `GET /` к 1.1.1.1:80 по TCP — сетевой клиент в кольце 3.
 pub static HTTPGET_ELF: &[u8] = include_bytes!(env!("USER_HTTPGET_ELF"));
 
+/// Прикладной C на stdio (M9n): round-trip через `FILE*` (fopen/fputs/fprintf/fgets/fgetc).
+pub static STDIOTEST_ELF: &[u8] = include_bytes!(env!("USER_STDIOTEST_ELF"));
+
 /// Встроенный запускатель (M7b): `execve("ARGVECHO", ["ARGVECHO","ping","pong"])` — проверяет
 /// передачу argv через execve. Целевой `ARGVECHO` лежит на диске.
 pub static EXECARGV_ELF: &[u8] = include_bytes!(env!("USER_EXECARGV_ELF"));

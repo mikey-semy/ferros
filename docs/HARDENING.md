@@ -396,6 +396,12 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
 
 ## M9 — POSIX / libc
 
+- **stdio `FILE*` is unbuffered (M9n).** Each `fgetc`/`fputc` (and thus `fgets`/`fputs`/`fprintf`) is a
+  separate `read`/`write` syscall — correct but slow for byte-at-a-time I/O. Real stdio buffers (line
+  buffering on a tty, full buffering on a file) and flushes on `fflush`/`fclose`/exit; ours `fflush`
+  is a no-op. Add a per-`FILE` buffer + flush points when performance matters. Also missing: `fseek`/
+  `ftell`/`rewind`, `ungetc`, `fscanf`/`scanf`, `freopen`, wide/`%f` formatting, and `size*nmemb`
+  overflow checks in `fread`/`fwrite` (matches mainstream libc, but unchecked).
 - **`brk` heap is a fixed region, no `mmap` (M9a).** The process heap is a fixed window
   `[USER_HEAP_BASE, USER_HEAP_MAX)` (1 GiB) that grows up by mapping pages on demand. There is
   **no `mmap`/`munmap`** (anonymous or file-backed), so large/aligned allocations and
