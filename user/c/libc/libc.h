@@ -24,6 +24,9 @@ int close(int fd);
 #define O_RDONLY 0
 #define O_WRONLY 1
 #define O_RDWR 2
+#define O_CREAT 0100   /* создать файл, если его нет (восьмеричное, как в Linux) */
+#define O_TRUNC 01000  /* обрезать до нуля при открытии */
+#define O_APPEND 02000 /* писать в конец */
 
 /* --- Сокеты (M8d3/M8e): подмножество BSD-сокетов поверх сисколлов. IPv4, UDP и TCP. --- */
 
@@ -96,5 +99,52 @@ int puts(const char *s);
  * сколько было бы записано без обрезки). */
 int snprintf(char *out, size_t cap, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
 int printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+/* --- Потоковый ввод-вывод stdio (`FILE *`) (M9n) --- */
+
+/* Конец файла / признак ошибки для функций чтения. */
+#define EOF (-1)
+
+/* Поток поверх дескриптора. БЕЗ буферизации (каждый getc/putc = syscall) — минимально и корректно;
+ * буферизацию (быстрее, меньше syscall'ов) добавим позже (см. HARDENING). Поля трогать снаружи не
+ * надо — только через функции ниже. */
+typedef struct {
+    int fd;    /* дескриптор */
+    int flags; /* внутренние биты: достигнут EOF / была ошибка */
+} FILE;
+
+/* Стандартные потоки: дескрипторы 0/1/2. */
+extern FILE *stdin;
+extern FILE *stdout;
+extern FILE *stderr;
+
+/* Открыть/закрыть поток. `mode`: "r"/"w"/"a" (+ "+" для чтения-записи); 'b' игнорируется.
+ * `fopen` возвращает `FILE *` или NULL; `fclose` — 0 или EOF. */
+FILE *fopen(const char *path, const char *mode);
+int fclose(FILE *f);
+
+/* Чтение. `fgetc`/`getc` возвращают байт (0..255) или EOF. `fgets` читает в `s` не больше `size-1`
+ * символов, останавливаясь после '\n' или на EOF, и завершает строку нулём; возвращает `s` или NULL
+ * (нечего читать). `fread` читает `nmemb` элементов по `size` байт; возвращает число прочитанных
+ * элементов. */
+int fgetc(FILE *f);
+int getc(FILE *f);
+char *fgets(char *s, int size, FILE *f);
+size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f);
+
+/* Запись. `fputc`/`putc` пишут байт (возвращают его или EOF). `fputs` пишет строку (≥0 или EOF).
+ * `fwrite` пишет `nmemb` элементов по `size` байт; возвращает число записанных элементов. `fprintf`
+ * форматирует (как `printf`) и пишет в поток; возвращает число символов. `fflush` для небуферизованного
+ * потока — no-op (возвращает 0). */
+int fputc(int c, FILE *f);
+int putc(int c, FILE *f);
+int fputs(const char *s, FILE *f);
+size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *f);
+int fprintf(FILE *f, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+int fflush(FILE *f);
+
+/* Признаки состояния потока. */
+int feof(FILE *f);
+int ferror(FILE *f);
 
 #endif /* FERROS_LIBC_H */
