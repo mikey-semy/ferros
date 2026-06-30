@@ -371,10 +371,24 @@ live in [LANDSCAPE.md](LANDSCAPE.md); this file is about hardening what we alrea
 - **`read`/`write` on a socket fd return `-EBADF` (M8d3).** Linux lets `read(2)`/`write(2)` act as
   `recv`/`send` on a (connected) socket; ferros only wires `sendto`/`recvfrom`. A stock binary using
   `read`/`write` on a socket breaks. Cheap to add once a connected-peer notion exists.
-- **UDP only; no TCP, no `connect`/`getsockname`/`setsockopt` (M8d3).** `SOCK_STREAM` (connect/send/
-  recv), socket options, and non-blocking (`O_NONBLOCK`/`MSG_DONTWAIT`) are unimplemented. `sendto`
-  kicks the stack once and relies on a following `recvfrom` to drive ARP/retransmit — a send-only
-  program may not actually transmit until the next poll.
+- **UDP `sendto` kicks the stack once (M8d3).** It relies on a following `recvfrom` to drive
+  ARP/retransmit — a send-only UDP program may not actually transmit until the next poll.
+- **TCP client only; no `listen`/`accept`/`getsockname`/`setsockopt` (M8e).** Stream sockets do
+  `connect`/`send`/`recv` (client). No server side (TCP `bind` → `EOPNOTSUPP`), no socket options, no
+  non-blocking (`O_NONBLOCK`/`MSG_DONTWAIT`). `connect` reports any non-established outcome as
+  `ECONNREFUSED`; a connection that establishes and is then RST between two poll iterations is
+  mis-reported as refused (rare, no data sent). TCP `close` removes the socket without sending a FIN
+  (abrupt) — a graceful shutdown handshake is deferred.
+- **TCP `recvfrom` doesn't fill `src_addr` (M8e).** Linux populates the peer address even on a
+  connected stream socket; ferros leaves `src_addr`/`*addrlen` untouched for TCP (the peer is known
+  from `connect`). Ported code that reads the source address off a stream `recvfrom` sees stale data.
+- **Per-call socket I/O is capped at `SOCK_IO_MAX` (4096) (M8e).** A single `sendto`/`recvfrom`
+  copies at most 4096 bytes; larger TCP transfers require the caller to loop (POSIX-legal short
+  reads/writes, but more frequent than Linux). UDP datagrams larger than 4096 are still truncated.
+- **Ephemeral ports: rotating counter, no free-port scan (M8d3/M8e).** `next_ephemeral_port` hands
+  out 49152..65535 round-robin; after wrap it can reissue a port still held by a live socket, and the
+  bind/connect then fails `-EINVAL` with no retry-on-another-port fallback. Fine at low socket counts;
+  a real allocator scans for a free port.
 - **Net time base = PIT `uptime_ns` (~55 ms granularity) (M8c).** Coarse for smoltcp retransmit/RTT
   timers; and frozen under IF=0 (above). A monotonic high-res clock (TSC/HPET) is the real fix.
 

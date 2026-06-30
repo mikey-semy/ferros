@@ -77,6 +77,19 @@ long recvfrom(int fd, void *buf, size_t n, int flags, struct sockaddr_in *src, s
     return sc6(45, fd, (long)buf, (long)n, flags, (long)src, (long)srclen); /* SYS_recvfrom */
 }
 
+int connect(int fd, const struct sockaddr_in *addr, socklen_t addrlen) {
+    return (int)sc3(42, fd, (long)addr, addrlen); /* SYS_connect */
+}
+
+/* send/recv для установленного сокета = sendto/recvfrom с NULL-адресом. */
+long send(int fd, const void *buf, size_t n, int flags) {
+    return sc6(44, fd, (long)buf, (long)n, flags, 0, 0); /* SYS_sendto, NULL dest */
+}
+
+long recv(int fd, void *buf, size_t n, int flags) {
+    return sc6(45, fd, (long)buf, (long)n, flags, 0, 0); /* SYS_recvfrom, NULL src */
+}
+
 /* --- Куча: bump-аллокатор поверх brk (сисколл 12). --- */
 
 static char *heap_cur; /* текущий конец занятой кучи (следующее malloc отдаёт отсюда) */
