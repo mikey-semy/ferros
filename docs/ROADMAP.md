@@ -173,7 +173,14 @@ Linux software → libc first): **M9a–M9f** built the libc-facing syscall surf
       SLIRP's DNS → `[dnsclient] dns.google -> 8.8.8.8`. **Networking is now reachable from userspace
       via the Linux socket ABI** — the north star. (Review caught a real IF=0 hang: syscalls run with
       interrupts off, so the PIT-derived wall-clock timeout can't fire — the busy-polls are now bounded
-      by a poll count instead. Scheduler block/wake + TCP are follow-ups; see HARDENING.)
+      by a poll count instead. Scheduler block/wake is a follow-up; see HARDENING.)
+  - **M8e — TCP sockets for ring 3** (done). Stream sockets over smoltcp's `tcp::Socket` (feature
+    `socket-tcp`): `connect`(42)/`send`/`recv` (`SOCK_STREAM`), with an `Fd::Socket` `SockKind` so each
+    syscall dispatches to the right typed op (a `get_mut::<T>` mismatch panics). A ring-3 **C** program
+    (`tcpdns`) opens a TCP connection to Google DNS 8.8.8.8:53, sends a **DNS-over-TCP** query, and
+    resolves `dns.google` → `[tcpdns] dns.google -> 8.8.8.8`. **Both UDP and TCP sockets now work from
+    ring 3.** TCP is client-only (no listen/accept), `close` is abrupt (no FIN); scheduler block/wake,
+    socket options, and the server side are follow-ups (HARDENING).
 - **M10 — Graphics / GUI (optional, huge).** Framebuffer, compositor, window
   manager, toolkit.
 - **M11 — Real hardware.** UEFI boot (migrate off bootloader 0.9), drivers for a

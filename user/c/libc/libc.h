@@ -25,13 +25,14 @@ int close(int fd);
 #define O_WRONLY 1
 #define O_RDWR 2
 
-/* --- Сокеты (M8d3): подмножество BSD-сокетов поверх сисколлов. Пока только IPv4/UDP. --- */
+/* --- Сокеты (M8d3/M8e): подмножество BSD-сокетов поверх сисколлов. IPv4, UDP и TCP. --- */
 
 typedef unsigned short sa_family_t;
 typedef unsigned int socklen_t;
 
-#define AF_INET 2    /* домен: IPv4 */
-#define SOCK_DGRAM 2 /* тип: датаграммы без соединения (UDP) */
+#define AF_INET 2     /* домен: IPv4 */
+#define SOCK_STREAM 1 /* тип: поток с установлением соединения (TCP) */
+#define SOCK_DGRAM 2  /* тип: датаграммы без соединения (UDP) */
 
 /* IPv4-адрес в сетевом порядке байт. */
 struct in_addr {
@@ -46,10 +47,15 @@ struct sockaddr_in {
     unsigned char sin_zero[8];
 };
 
-/* Создать сокет: domain=AF_INET, type=SOCK_DGRAM, protocol=0. Возвращает fd (≥0) или -errno. */
+/* Создать сокет: domain=AF_INET, type=SOCK_DGRAM/SOCK_STREAM, protocol=0. fd (≥0) или -errno. */
 int socket(int domain, int type, int protocol);
-/* Привязать сокет к локальному порту из `addr`. 0 или -errno. */
+/* Привязать сокет к локальному порту из `addr` (UDP). 0 или -errno. */
 int bind(int fd, const struct sockaddr_in *addr, socklen_t addrlen);
+/* Установить TCP-соединение с `addr` (блокирующе). 0 или -errno. */
+int connect(int fd, const struct sockaddr_in *addr, socklen_t addrlen);
+/* Отправить/принять в установленном (TCP) сокете. Возвращают число байт или -errno. */
+long send(int fd, const void *buf, size_t n, int flags);
+long recv(int fd, void *buf, size_t n, int flags);
 /* Отправить датаграмму на `dst`. Возвращает число байт или -errno. `flags` игнорируется. */
 long sendto(int fd, const void *buf, size_t n, int flags, const struct sockaddr_in *dst,
             socklen_t dstlen);
