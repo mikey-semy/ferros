@@ -148,8 +148,12 @@ Linux software → libc first): **M9a–M9f** built the libc-facing syscall surf
     `optarg`/`optind`/`opterr`/`optopt`), and **`environ`/`getenv`** (M9q: crt0 captures `envp` into
     the global `environ`; `getenv` does exact-name lookup — process env is empty for now since the
     kernel passes an empty `envp`, but the plumbing is ready). A C program does a `FILE*` write→read
-    round-trip on FAT; `libcheck` self-tests string/number/getopt/getenv. Next libc growth: stdio
-    buffering (HARDENING), a real utility on top of the libc, and/or revisiting relibc.
+    round-trip on FAT; `libcheck` self-tests string/number/getopt/getenv.
+  - **M9r — a real `wc` utility** (done). `user/c/wc.c` — `-l`/`-w`/`-c` flags via `getopt`, file read
+    via `FILE*` (`fopen`/`fgetc`), word-count state machine, `printf` output. On disk as `/bin/wc`, run
+    by the shell as a coreutil: `wc -lw /HELLO.TXT` → `1 5 /HELLO.TXT`. **The hand-rolled libc now runs
+    a real utility** — `getopt` + stdio + `printf` together end-to-end. Next libc growth: stdio
+    buffering (HARDENING), more utilities/functions as needed, and/or revisiting relibc.
 - **M8 — Networking** (in progress). NIC driver (virtio-net) + TCP/IP via `smoltcp` (vendored per
   D13 — a real stack is the "genuinely complex" kind we reuse). Stages:
   - **M8a — NIC detection** (done). QEMU gets a `virtio-net-pci` over user-mode (SLIRP) networking;
