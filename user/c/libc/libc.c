@@ -722,3 +722,79 @@ int feof(FILE *f) {
 int ferror(FILE *f) {
     return (f->flags & _F_ERR) ? 1 : 0;
 }
+
+/* --- Разбор опций getopt(3) (M9p) --- */
+
+char *optarg = 0;
+int optind = 1;
+int opterr = 1;
+int optopt = 0;
+
+int getopt(int argc, char *const argv[], const char *optstring) {
+    static int optpos = 1; /* позиция внутри сгруппированного аргумента, напр. -abc */
+
+    if (optind >= argc) {
+        return -1;
+    }
+    char *cur = argv[optind];
+    /* Не опция: NULL, не с '-', либо просто "-". */
+    if (cur == 0 || cur[0] != '-' || cur[1] == '\0') {
+        return -1;
+    }
+    /* "--" — явный конец опций: пропускаем его и останавливаемся. */
+    if (cur[1] == '-' && cur[2] == '\0') {
+        optind++;
+        return -1;
+    }
+
+    int c = (unsigned char)cur[optpos];
+    /* ':' — это маркер аргумента в optstring, а не сама опция. */
+    const char *spec = (c == ':') ? 0 : strchr(optstring, c);
+
+    if (spec == 0) {
+        /* Неизвестная опция. */
+        optopt = c;
+        if (opterr && optstring[0] != ':') {
+            fprintf(stderr, "%s: invalid option -- '%c'\n", argv[0], c);
+        }
+        optpos++;
+        if (cur[optpos] == '\0') {
+            optind++;
+            optpos = 1; /* группа кончилась — к следующему argv */
+        }
+        return '?';
+    }
+
+    if (spec[1] == ':') {
+        /* Опция с аргументом: слитно (`-oVAL`) или следующим словом (`-o VAL`). */
+        if (cur[optpos + 1] != '\0') {
+            optarg = &cur[optpos + 1];
+            optind++;
+        } else if (optind + 1 < argc) {
+            optarg = argv[optind + 1];
+            optind += 2;
+        } else {
+            /* Аргумент отсутствует. */
+            optopt = c;
+            optind++;
+            optpos = 1;
+            if (optstring[0] == ':') {
+                return ':'; /* «тихий» режим: сигналим двоеточием, без печати */
+            }
+            if (opterr) {
+                fprintf(stderr, "%s: option requires an argument -- '%c'\n", argv[0], c);
+            }
+            return '?';
+        }
+        optpos = 1;
+        return c;
+    }
+
+    /* Опция без аргумента. */
+    optpos++;
+    if (cur[optpos] == '\0') {
+        optind++;
+        optpos = 1;
+    }
+    return c;
+}

@@ -1,7 +1,8 @@
 /*
- * Проверка строковых/мемори/конвертирующих функций минимальной libc (M9k, расширено M9o):
- * `memmove`/`memcmp`/`strncmp`/`strcpy`/`strncpy`/`strchr`/`atoi` и новые
- * `strcat`/`strncat`/`strrchr`/`strstr`/`strtok`/`strtol`/`strtoul`. Линкуется с crt0 + libc.
+ * Проверка строковых/мемори/конвертирующих функций минимальной libc (M9k, расширено M9o/M9p):
+ * `memmove`/`memcmp`/`strncmp`/`strcpy`/`strncpy`/`strchr`/`atoi`,
+ * `strcat`/`strncat`/`strrchr`/`strstr`/`strtok`/`strtol`/`strtoul` (M9o), `getopt` (M9p).
+ * Линкуется с crt0 + libc.
  *
  * Самопроверяется: каждая группа возвращает свой ненулевой код при ошибке, 0 — если всё сошлось.
  */
@@ -138,6 +139,43 @@ int main(void) {
         }
         if (strtok(0, ",") != 0) {
             return 24;
+        }
+    }
+
+    /* getopt (M9p): кластеризация, слитный (-bval) и раздельный (-c carg) аргумент, стоп на не-опции. */
+    {
+        char *av[] = {"prog", "-a", "-bval", "-c", "carg", "rest", 0};
+        int ac = 6;
+        optind = 1;
+        opterr = 0; /* без печати ошибок в stderr */
+        int seen_a = 0, seen_b = 0, seen_c = 0;
+        char *bval = 0, *cval = 0;
+        int o;
+        while ((o = getopt(ac, av, "ab:c:")) != -1) {
+            switch (o) {
+            case 'a':
+                seen_a = 1;
+                break;
+            case 'b':
+                seen_b = 1;
+                bval = optarg;
+                break;
+            case 'c':
+                seen_c = 1;
+                cval = optarg;
+                break;
+            default:
+                return 25;
+            }
+        }
+        if (!seen_a || !seen_b || !seen_c) {
+            return 25;
+        }
+        if (!bval || strcmp(bval, "val") != 0 || !cval || strcmp(cval, "carg") != 0) {
+            return 25;
+        }
+        if (optind != 5 || strcmp(av[optind], "rest") != 0) {
+            return 25;
         }
     }
 
