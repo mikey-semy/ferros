@@ -27,6 +27,14 @@ pub const SYS_READV: u64 = 19;
 pub const SYS_WRITEV: u64 = 20;
 /// `fcntl(fd, cmd, arg)` — управление дескриптором (дублирование/флаги) (M9f).
 pub const SYS_FCNTL: u64 = 72;
+/// `socket(domain, type, protocol)` — создать сокет, вернуть дескриптор (M8d3).
+pub const SYS_SOCKET: u64 = 41;
+/// `bind(fd, addr, addrlen)` — привязать сокет к локальному адресу/порту (M8d3).
+pub const SYS_BIND: u64 = 49;
+/// `sendto(fd, buf, len, flags, dest_addr, addrlen)` — отправить датаграмму (M8d3).
+pub const SYS_SENDTO: u64 = 44;
+/// `recvfrom(fd, buf, len, flags, src_addr, addrlen)` — принять датаграмму (M8d3).
+pub const SYS_RECVFROM: u64 = 45;
 /// `stat(path, statbuf)` — метаданные файла по пути в `struct stat` (M9c).
 pub const SYS_STAT: u64 = 4;
 /// `fstat(fd, statbuf)` — метаданные по дескриптору (M9c; для `isatty` и т.п.).
@@ -125,6 +133,8 @@ pub const S_IFDIR: u32 = 0o040000;
 pub const S_IFCHR: u32 = 0o020000;
 /// FIFO/канал (концы `pipe`).
 pub const S_IFIFO: u32 = 0o010000;
+/// Сокет (M8d3).
+pub const S_IFSOCK: u32 = 0o140000;
 
 // --- Подкоманды arch_prctl(2) (Linux x86-64, M9b) ---
 
@@ -149,6 +159,16 @@ pub const O_CREAT: u64 = 0o100;
 pub const O_TRUNC: u64 = 0o1000;
 /// Дописывать в конец: позиция при открытии — в конце файла (M7g1; для `>>`).
 pub const O_APPEND: u64 = 0o2000;
+
+// --- Сокеты (Linux x86-64, M8d3) ---
+
+/// Семейство адресов IPv4 (`AF_INET`). `struct sockaddr_in` (16 байт): `sin_family` (u16, порядок
+/// хоста), `sin_port` (u16, сетевой порядок), `sin_addr` (4 байта IPv4), `sin_zero[8]`.
+pub const AF_INET: u64 = 2;
+/// Тип сокета: датаграммы без соединения (`SOCK_DGRAM`, у нас = UDP). Поток (`SOCK_STREAM`) — позже.
+pub const SOCK_DGRAM: u64 = 2;
+/// Размер `struct sockaddr_in` в байтах.
+pub const SOCKADDR_IN_LEN: usize = 16;
 
 // --- Номера сигналов (Linux x86-64) ---
 
@@ -205,3 +225,13 @@ pub const ENOSYS: i64 = 38;
 pub const ENOTEMPTY: i64 = 39;
 /// Результат не помещается в переданный буфер (например, `getcwd` с малым `size`, M7c).
 pub const ERANGE: i64 = 34;
+/// Операция над не-сокетом (fd указывает не на сокет, M8d3).
+pub const ENOTSOCK: i64 = 88;
+/// Сообщение слишком длинное (датаграмма не влезла в буфер сокета, M8d3).
+pub const EMSGSIZE: i64 = 90;
+/// Протокол не поддержан для этого типа сокета (M8d3).
+pub const EPROTONOSUPPORT: i64 = 93;
+/// Семейство адресов не поддержано (поддержан только `AF_INET`, M8d3).
+pub const EAFNOSUPPORT: i64 = 97;
+/// Сеть не работает: стек не поднялся (нет NIC / DHCP не настроился, M8d3).
+pub const ENETDOWN: i64 = 100;

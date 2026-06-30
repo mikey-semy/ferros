@@ -163,6 +163,7 @@ fn build_c_programs(manifest: &str) {
         c_dir.join("libcheck.c"),
         c_dir.join("catfile.c"),
         c_dir.join("ccat.c"),
+        c_dir.join("dnsclient.c"),
         libc_dir.join("crt0.s"),
         libc_dir.join("libc.c"),
         libc_dir.join("libc.h"),
@@ -254,6 +255,19 @@ fn build_c_programs(manifest: &str) {
     // переменную окружения не выставляем — образ диска прочитает ELF из OUT_DIR.
     let ccat_o = clang_compile_c(&c_dir.join("ccat.c"), &out_dir.join("ccat.o"), &[&inc]);
     clang_link(&[&crt0_o, &libc_o, &ccat_o], &out_dir.join("ccat"), &linker);
+
+    // M8d3: `dnsclient` — резолвит имя по DNS через сокет-сисколлы (socket/sendto/recvfrom).
+    let dns_o = clang_compile_c(
+        &c_dir.join("dnsclient.c"),
+        &out_dir.join("dnsclient.o"),
+        &[&inc],
+    );
+    let dns_elf = clang_link(
+        &[&crt0_o, &libc_o, &dns_o],
+        &out_dir.join("dnsclient"),
+        &linker,
+    );
+    println!("cargo:rustc-env=USER_DNSCLIENT_ELF={}", dns_elf.display());
 }
 
 /// Общие флаги компиляции C для пользовательского таргета ferros (см. [`build_c_programs`]).

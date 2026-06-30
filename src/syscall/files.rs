@@ -74,6 +74,35 @@ enum Fd {
     PipeRead(PipeRead),
     /// Конец записи канала (M7g2).
     PipeWrite(PipeWrite),
+    /// UDP-сокет кольца 3 (M8d3): хэндл в общий сетевой стек.
+    Socket(SocketEnd),
+}
+
+/// Сокет в таблице дескрипторов (M8d3): хэндл в общий сетевой стек ([`crate::net::socket`]) плюс
+/// refcount — как у концов канала. `Clone` (fork/dup2) добавляет ссылку, `Drop` (close/exit/kill)
+/// убирает; когда исчезает последняя — сокет удаляется из стека. Так fork/dup2/close/exit
+/// учитываются сами, без отдельных хуков.
+struct SocketEnd {
+    handle: crate::net::socket::Handle,
+    refs: Arc<()>,
+}
+
+impl Clone for SocketEnd {
+    fn clone(&self) -> Self {
+        SocketEnd {
+            handle: self.handle,
+            refs: self.refs.clone(),
+        }
+    }
+}
+
+impl Drop for SocketEnd {
+    fn drop(&mut self) {
+        // Этот конец — последний владелец (включая себя)? Тогда сокет больше никому не нужен.
+        if Arc::strong_count(&self.refs) == 1 {
+            crate::net::socket::udp_close(self.handle);
+        }
+    }
 }
 
 /// Разделяемый буфер канала (M7g2): байты в пути + число живых концов чтения/записи. Счётчики
@@ -851,6 +880,7 @@ pub fn sys_fstat(fd: u64, statbuf: u64) -> i64 {
             Some(Fd::PipeRead(_)) | Some(Fd::PipeWrite(_)) => {
                 Some(build_stat(abi::S_IFIFO | 0o600, 0, 1, 0))
             }
+            Some(Fd::Socket(_)) => Some(build_stat(abi::S_IFSOCK | 0o600, 0, 1, 0)),
             Some(Fd::File(f)) => {
                 let nlink = if f.is_dir { 2 } else { 1 };
                 Some(build_stat(
@@ -1050,6 +1080,7 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
                 None => -abi::EBADF,
                 Some(Fd::Console) | Some(Fd::PipeRead(_)) => abi::O_RDONLY as i64,
                 Some(Fd::Vga) | Some(Fd::Serial) | Some(Fd::PipeWrite(_)) => abi::O_WRONLY as i64,
+                Some(Fd::Socket(_)) => abi::O_RDWR as i64,
                 Some(Fd::File(f)) => {
                     if f.writable {
                         abi::O_RDWR as i64
@@ -1216,4 +1247,154 @@ pub fn sys_lseek(fd: u64, offset: i64, whence: u64) -> i64 {
             _ => -abi::EINVAL,
         }
     })
+}
+
+// --- Сокеты (M8d3) ---
+
+/// Максимум полезной нагрузки одной датаграммы (UDP поверх IPv4/Ethernet без фрагментации).
+const MAX_DGRAM: usize = 1472;
+
+/// Достаёт хэндл сокета из дескриптора `fd`. `EBADF` — нет такого fd; `ENOTSOCK` — fd не сокет.
+fn socket_handle(fd: u64) -> Result<crate::net::socket::Handle, i64> {
+    with_current_fds(|fds| match fds.get(fd as usize).and_then(|s| s.as_ref()) {
+        Some(Fd::Socket(s)) => Ok(s.handle),
+        Some(_) => Err(abi::ENOTSOCK),
+        None => Err(abi::EBADF),
+    })
+}
+
+/// Разбирает пользовательский `struct sockaddr_in` (`AF_INET`): возвращает IPv4-октеты и порт.
+/// `EINVAL` — буфер короче 16 байт; `EAFNOSUPPORT` — не `AF_INET`; `EFAULT` — адрес недоступен.
+fn parse_sockaddr_in(addr_ptr: u64, addrlen: u64) -> Result<([u8; 4], u16), i64> {
+    if (addrlen as usize) < abi::SOCKADDR_IN_LEN {
+        return Err(abi::EINVAL);
+    }
+    uaccess::with_user_bytes(addr_ptr, abi::SOCKADDR_IN_LEN as u64, |b| {
+        // sin_family — в порядке хоста; sin_port и sin_addr — в сетевом (big-endian).
+        if u16::from_ne_bytes([b[0], b[1]]) as u64 != abi::AF_INET {
+            return Err(abi::EAFNOSUPPORT);
+        }
+        Ok(([b[4], b[5], b[6], b[7]], u16::from_be_bytes([b[2], b[3]])))
+    })?
+}
+
+/// Собирает `struct sockaddr_in` адреса отправителя (для `recvfrom`).
+fn encode_sockaddr_in(ip: [u8; 4], port: u16) -> [u8; abi::SOCKADDR_IN_LEN] {
+    let mut sa = [0u8; abi::SOCKADDR_IN_LEN];
+    sa[0..2].copy_from_slice(&(abi::AF_INET as u16).to_ne_bytes()); // sin_family (порядок хоста)
+    sa[2..4].copy_from_slice(&port.to_be_bytes()); // sin_port (сетевой)
+    sa[4..8].copy_from_slice(&ip); // sin_addr
+    sa // sin_zero[8] = 0
+}
+
+/// `socket(domain, type, protocol)` (M8d3): создаёт UDP-сокет (`AF_INET`+`SOCK_DGRAM`) в общем
+/// стеке и кладёт его в дескриптор. `protocol` игнорируем (0 = UDP). Возвращает fd или `-errno`
+/// (`EAFNOSUPPORT`/`EPROTONOSUPPORT` — неподдержанные домен/тип; `ENETDOWN` — сеть не поднялась;
+/// `EMFILE` — таблица дескрипторов полна).
+pub fn sys_socket(domain: u64, sock_type: u64, _protocol: u64) -> i64 {
+    if domain != abi::AF_INET {
+        return -abi::EAFNOSUPPORT;
+    }
+    if sock_type != abi::SOCK_DGRAM {
+        return -abi::EPROTONOSUPPORT;
+    }
+    let handle = match crate::net::socket::udp_socket() {
+        Ok(h) => h,
+        Err(e) => return -e,
+    };
+    let end = SocketEnd {
+        handle,
+        refs: Arc::new(()),
+    };
+    // Если таблица полна, alloc_fd вернёт -EMFILE и НЕ сохранит entry — тогда `Fd::Socket` дропнется
+    // прямо в alloc_fd, и его `Drop` уберёт сокет из стека (без утечки). Иначе — номер дескриптора.
+    with_current_fds(|fds| alloc_fd(fds, Fd::Socket(end)))
+}
+
+/// `bind(fd, addr, addrlen)` (M8d3): привязывает UDP-сокет к локальному порту из `sockaddr_in`
+/// (адрес привязки игнорируем — принимаем на всех локальных). 0 или `-errno`.
+pub fn sys_bind(fd: u64, addr_ptr: u64, addrlen: u64) -> i64 {
+    // Дескриптор проверяем ПЕРВЫМ (EBADF/ENOTSOCK старше ошибок адреса — как в Linux).
+    let handle = match socket_handle(fd) {
+        Ok(h) => h,
+        Err(e) => return -e,
+    };
+    let (_ip, port) = match parse_sockaddr_in(addr_ptr, addrlen) {
+        Ok(v) => v,
+        Err(e) => return -e,
+    };
+    match crate::net::socket::udp_bind(handle, port) {
+        Ok(()) => 0,
+        Err(e) => -e,
+    }
+}
+
+/// `sendto(fd, buf, len, flags, dest_addr, addrlen)` (M8d3): шлёт датаграмму на адрес из
+/// `dest_addr`. `flags` игнорируем. Возвращает число отправленных байт или `-errno` (`EMSGSIZE` —
+/// `len` больше [`MAX_DGRAM`]).
+pub fn sys_sendto(fd: u64, buf: u64, len: u64, dest_addr: u64, addrlen: u64) -> i64 {
+    // Дескриптор проверяем ПЕРВЫМ (EBADF/ENOTSOCK старше ошибок длины/адреса — как в Linux).
+    let handle = match socket_handle(fd) {
+        Ok(h) => h,
+        Err(e) => return -e,
+    };
+    if len as usize > MAX_DGRAM {
+        return -abi::EMSGSIZE;
+    }
+    let (ip, port) = match parse_sockaddr_in(dest_addr, addrlen) {
+        Ok(v) => v,
+        Err(e) => return -e,
+    };
+    let data = match uaccess::with_user_bytes(buf, len, |b| b.to_vec()) {
+        Ok(v) => v,
+        Err(e) => return -e,
+    };
+    match crate::net::socket::udp_sendto(handle, &data, ip, port) {
+        Ok(n) => n as i64,
+        Err(e) => -e,
+    }
+}
+
+/// `recvfrom(fd, buf, len, flags, src_addr, addrlen)` (M8d3): принимает датаграмму в `buf`
+/// (блокирующе опросом — бюджет в опросах, см. `net::socket`). `flags` игнорируем. Если `src_addr` и
+/// `addrlen` не NULL, пишет туда `sockaddr_in` отправителя (не больше входного `*addrlen` байт) и
+/// кладёт фактическую длину `16` в `*addrlen`. Возвращает число прочитанных байт или `-errno`
+/// (`EAGAIN` — за отведённые опросы ничего не пришло).
+pub fn sys_recvfrom(fd: u64, buf: u64, len: u64, src_addr: u64, addrlen_ptr: u64) -> i64 {
+    let handle = match socket_handle(fd) {
+        Ok(h) => h,
+        Err(e) => return -e,
+    };
+    let cap = (len as usize).min(MAX_DGRAM);
+    let mut kbuf = alloc::vec![0u8; cap];
+    let (n, ip, port) = match crate::net::socket::udp_recvfrom(handle, &mut kbuf) {
+        Ok(v) => v,
+        Err(e) => return -e,
+    };
+    if let Err(e) = uaccess::copy_to_user(buf, &kbuf[..n]) {
+        return -e;
+    }
+    // Адрес отправителя — только если запросили (src_addr и addrlen оба не NULL, как требует POSIX).
+    // Пишем не больше, чем вызывающий объявил во ВХОДНОМ `*addrlen` (иначе затёрли бы его память за
+    // буфером адреса), затем кладём туда фактическую длину (16).
+    if src_addr != 0 && addrlen_ptr != 0 {
+        let want = match uaccess::with_user_bytes(addrlen_ptr, 4, |b| {
+            u32::from_ne_bytes([b[0], b[1], b[2], b[3]]) as usize
+        }) {
+            Ok(v) => v,
+            Err(e) => return -e,
+        };
+        let sa = encode_sockaddr_in(ip, port);
+        let w = want.min(sa.len());
+        if w > 0 {
+            if let Err(e) = uaccess::copy_to_user(src_addr, &sa[..w]) {
+                return -e;
+            }
+        }
+        let l = (abi::SOCKADDR_IN_LEN as u32).to_ne_bytes();
+        if let Err(e) = uaccess::copy_to_user(addrlen_ptr, &l) {
+            return -e;
+        }
+    }
+    n as i64
 }
