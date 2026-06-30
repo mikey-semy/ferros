@@ -1,8 +1,8 @@
 /*
  * Проверка строковых/мемори/конвертирующих функций минимальной libc (M9k, расширено M9o/M9p):
  * `memmove`/`memcmp`/`strncmp`/`strcpy`/`strncpy`/`strchr`/`atoi`,
- * `strcat`/`strncat`/`strrchr`/`strstr`/`strtok`/`strtol`/`strtoul` (M9o), `getopt` (M9p).
- * Линкуется с crt0 + libc.
+ * `strcat`/`strncat`/`strrchr`/`strstr`/`strtok`/`strtol`/`strtoul` (M9o), `getopt` (M9p),
+ * `getenv` (M9q). Линкуется с crt0 + libc.
  *
  * Самопроверяется: каждая группа возвращает свой ненулевой код при ошибке, 0 — если всё сошлось.
  */
@@ -176,6 +176,22 @@ int main(void) {
         }
         if (optind != 5 || strcmp(av[optind], "rest") != 0) {
             return 25;
+        }
+    }
+
+    /* getenv (M9q): на подменённом environ (у процесса окружение пустое, поэтому ставим своё). */
+    {
+        char *env[] = {"HOME=/root", "PATH=/bin", 0};
+        environ = env;
+        if (!getenv("HOME") || strcmp(getenv("HOME"), "/root") != 0) {
+            return 26;
+        }
+        if (!getenv("PATH") || strcmp(getenv("PATH"), "/bin") != 0) {
+            return 26;
+        }
+        /* нет такой переменной; и префикс не должен ложно совпасть ("HOM" ≠ "HOME"). */
+        if (getenv("MISSING") != 0 || getenv("HOM") != 0) {
+            return 26;
         }
     }
 

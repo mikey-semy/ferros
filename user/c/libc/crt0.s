@@ -12,6 +12,7 @@ _start:
     mov  rdi, [rsp]               # argc
     lea  rsi, [rsp + 8]           # argv = &стек[1]
     lea  rdx, [rsp + rdi*8 + 16]  # envp = argv + (argc+1) = rsp + 8 + (argc+1)*8
+    mov  [rip + environ], rdx     # сохраняем envp в глобал libc `environ` (для getenv); rdx → main
     xor  rbp, rbp                 # конец цепочки кадров (frame pointer = 0)
     call main
     mov  edi, eax                 # код возврата main → аргумент exit

@@ -798,3 +798,23 @@ int getopt(int argc, char *const argv[], const char *optstring) {
     }
     return c;
 }
+
+/* --- Окружение процесса (M9q) --- */
+
+/* Заполняется crt0 из envp начального стека (до вызова main). До этого / без crt0 — NULL;
+ * getenv это переносит. */
+char **environ;
+
+char *getenv(const char *name) {
+    if (environ == 0 || name == 0) {
+        return 0;
+    }
+    size_t nlen = strlen(name);
+    for (char **e = environ; *e != 0; e++) {
+        /* Точное имя: "ИМЯ" и сразу '=' (чтобы "HOM" не цеплялось к "HOME=..."). */
+        if (strncmp(*e, name, nlen) == 0 && (*e)[nlen] == '=') {
+            return *e + nlen + 1; /* значение после '=' */
+        }
+    }
+    return 0;
+}
