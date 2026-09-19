@@ -48,4 +48,10 @@ cargo run     # builds the kernel image and boots it in QEMU
 
 ## License
 
-Proprietary — **All Rights Reserved**. See [LICENSE](LICENSE).
+Dual-licensed under either **MIT** ([LICENSE-MIT](LICENSE-MIT)) or **Apache
+License 2.0** ([LICENSE-APACHE](LICENSE-APACHE)), at your option — the usual
+choice in the Rust ecosystem, and the same terms as
+[blog_os](https://os.phil-opp.com/), whose approach the early milestones follow.
+
+Unless you state otherwise, any contribution you intentionally submit for
+inclusion shall be dual-licensed as above, with no additional terms.

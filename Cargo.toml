@@ -2,7 +2,7 @@
 name = "ferros"
 version = "0.1.0"
 edition = "2021"
-authors = ["Mikhail Toshkin <toshkin.mikhail@gmail.com>"]
+authors = ["mikey-semy <34812500+mikey-semy@users.noreply.github.com>"]
 description = "ferros — an operating system written from scratch in Rust (x86_64, monolithic kernel)"
 license-file = "LICENSE"
 readme = "README.md"
