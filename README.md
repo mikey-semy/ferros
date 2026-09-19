@@ -3,8 +3,22 @@
 An operating system written from scratch in **Rust**, targeting **x86_64** with a
 **monolithic** kernel.
 
-> **Status: M2 — interrupts** (exceptions + timer & keyboard; the kernel is interactive).
-> See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan (milestones M0 → M12).
+> **Status: paused at M9 — POSIX / libc**, 30 June 2026.
+> Written in five days (26–30 June 2026): 78 commits, ~18k lines of Rust, tests
+> a quarter of that. Not abandoned in confusion — stopped at the top of what one
+> person can carry. See [docs/ROADMAP.md](docs/ROADMAP.md) for M0 → M12.
+>
+> **Where it actually got to.** ferros boots, runs ring-3 processes from ELF,
+> talks virtio-blk and virtio-net, gets an IP over DHCP, pings its gateway,
+> resolves names over DNS, opens TCP sockets from userspace and makes an HTTP
+> request — on top of its own libc (`FILE*`, `getopt`, `strtol`, `environ`) with
+> a working `wc` built against it.
+>
+> **What is not done, and why it is the hard part.** Everything above lives in
+> QEMU, where each device class has exactly one well-behaved implementation.
+> Real hardware (M11) is not more code — it is an endless chase of controller
+> models and silicon errata that no documentation describes. M10 (graphics) and
+> M12 (self-hosting) are each a separate product.
 
 ## What this is
 
